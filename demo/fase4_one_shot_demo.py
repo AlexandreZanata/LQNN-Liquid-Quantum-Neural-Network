@@ -1,5 +1,5 @@
-# Biological principle: conceptual memory is represented by evolving topology
-# rather than fixed classifier weights.
+# Learning principle: one-shot categorization relies on structural memory,
+# allowing immediate concept acquisition without iterative training.
 
 from pathlib import Path
 import sys

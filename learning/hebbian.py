@@ -1,3 +1,5 @@
 # Biological principle: correlated firing strengthens synaptic coupling.
 
-"""Phase 2 placeholder for Hebbian learning helpers."""
+from lqnn.learning.hebbian import apply_hebbian_update
+
+__all__ = ["apply_hebbian_update"]

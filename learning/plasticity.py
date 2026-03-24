@@ -1,4 +1,6 @@
 # Biological principle: plasticity changes over lifetime to balance learning
 # and stability.
 
-"""Phase 2-3 placeholder for plasticity control."""
+from lqnn.learning.plasticity import modulate_signal
+
+__all__ = ["modulate_signal"]

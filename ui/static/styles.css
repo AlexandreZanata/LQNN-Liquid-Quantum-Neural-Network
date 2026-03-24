@@ -1,0 +1,135 @@
+:root {
+  --bg: #081018;
+  --card: #101a24;
+  --line: #1f3248;
+  --text: #dce6ef;
+  --muted: #8ca4bc;
+  --accent: #2a9d8f;
+  --accent-soft: #2e86c1;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "JetBrains Mono", "Fira Code", monospace;
+  background: radial-gradient(circle at 20% 10%, #12263a 0%, var(--bg) 50%);
+  color: var(--text);
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 16px;
+  padding: 16px;
+  min-height: 100vh;
+}
+
+.canvas-card,
+.panel {
+  background: rgba(16, 26, 36, 0.92);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: 0 10px 35px rgba(0, 0, 0, 0.25);
+}
+
+.canvas-card {
+  padding: 14px;
+}
+
+.canvas-card header {
+  margin-bottom: 10px;
+}
+
+h1 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+h2 {
+  margin: 16px 0 8px;
+  font-size: 0.95rem;
+}
+
+#status {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+#network-canvas {
+  width: 100%;
+  height: auto;
+  border-radius: 10px;
+  border: 1px solid #1c2f45;
+  background: linear-gradient(180deg, #08131e 0%, #050b13 100%);
+}
+
+.panel {
+  padding: 14px;
+}
+
+label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+textarea {
+  width: 100%;
+  border-radius: 8px;
+  border: 1px solid #22374f;
+  background: #0c1724;
+  color: var(--text);
+  padding: 8px;
+  resize: vertical;
+}
+
+.buttons {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+button {
+  border: 1px solid #264665;
+  background: linear-gradient(180deg, #1f4768 0%, #17344b 100%);
+  color: #e8f3fb;
+  border-radius: 8px;
+  padding: 8px 10px;
+  cursor: pointer;
+  transition: transform 120ms ease, filter 120ms ease;
+}
+
+button:hover {
+  transform: translateY(-1px);
+  filter: brightness(1.05);
+}
+
+.check-row {
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+li {
+  margin-bottom: 4px;
+  color: #b9ccdd;
+  font-size: 0.83rem;
+}
+
+@media (max-width: 960px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+}

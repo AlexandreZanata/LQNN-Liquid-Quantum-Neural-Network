@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LQNN Live UI</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="layout">
+    <section class="canvas-card">
+      <header>
+        <h1>LQNN - Organismo Computacional Vivo</h1>
+        <p id="status">Conectando...</p>
+      </header>
+      <canvas id="network-canvas" width="920" height="620"></canvas>
+    </section>
+
+    <aside class="panel">
+      <h2>Interacao</h2>
+      <label for="text-input">Entrada de texto</label>
+      <textarea id="text-input" rows="3" placeholder="Digite um estimulo textual..."></textarea>
+
+      <div class="buttons">
+        <button id="stimulate-btn">Stimulate</button>
+        <button id="sleep-btn">Sleep</button>
+        <button id="reset-btn">Reset network</button>
+        <button id="quantum-btn">Toggle quantum mode</button>
+      </div>
+
+      <label class="check-row">
+        <input type="checkbox" id="auto-toggle" checked>
+        Atualizacao automatica
+      </label>
+
+      <h2>Metricas ao vivo</h2>
+      <ul id="metrics"></ul>
+
+      <h2>Energia por ramo</h2>
+      <ul id="branches"></ul>
+    </aside>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
