@@ -1,0 +1,10 @@
+# Python cache and virtual env
+__pycache__/
+*.pyc
+.venv/
+
+# IDE files
+.idea/
+
+# Local model artifacts
+models/
