@@ -17,6 +17,7 @@ log = logging.getLogger(__name__)
 _controller = None
 _ws_server = None
 _trainer = None
+_chat_sessions = None
 
 
 class ChatRequest(BaseModel):
@@ -36,8 +37,19 @@ class KnowledgeUrlRequest(BaseModel):
     tags: list[str] = []
 
 
+class ChatSessionCreateRequest(BaseModel):
+    title: str = "New chat"
+
+
+class ChatSessionSaveRequest(BaseModel):
+    title: str | None = None
+    messages: list[dict] = []
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if _controller and getattr(_controller, "ingestion_queue", None):
+        await _controller.ingestion_queue.start()
     if _ws_server:
         await _ws_server.start()
     auto_train = os.environ.get("AUTO_TRAIN_ON_START", "0").strip().lower() in {
@@ -50,13 +62,17 @@ async def lifespan(app: FastAPI):
         await _trainer.stop()
     if _ws_server:
         await _ws_server.stop()
+    if _controller and getattr(_controller, "ingestion_queue", None):
+        await _controller.ingestion_queue.stop()
 
 
 def create_app(controller=None, ws_server=None, trainer=None) -> FastAPI:
-    global _controller, _ws_server, _trainer
+    global _controller, _ws_server, _trainer, _chat_sessions
     _controller = controller
     _ws_server = ws_server
     _trainer = trainer
+    from lqnn.system.chat_sessions import ChatSessionStore
+    _chat_sessions = ChatSessionStore()
 
     app = FastAPI(title="LQNN v3 - Quantum Associative Brain", lifespan=lifespan)
     app.mount("/static", StaticFiles(directory="ui/static"), name="static")
@@ -108,6 +124,44 @@ def create_app(controller=None, ws_server=None, trainer=None) -> FastAPI:
         if not _controller:
             return {"error": "not_initialized"}
         return await asyncio.to_thread(_controller.chat_turn, req.text)
+
+    @app.get("/api/chat/sessions")
+    async def list_chat_sessions():
+        if not _chat_sessions:
+            return []
+        return _chat_sessions.list_sessions()
+
+    @app.post("/api/chat/sessions")
+    async def create_chat_session(req: ChatSessionCreateRequest):
+        if not _chat_sessions:
+            return {"error": "sessions_not_initialized"}
+        return _chat_sessions.create_session(req.title)
+
+    @app.get("/api/chat/sessions/{session_id}")
+    async def get_chat_session(session_id: str):
+        if not _chat_sessions:
+            return {"error": "sessions_not_initialized"}
+        sess = _chat_sessions.get_session(session_id)
+        if not sess:
+            return {"error": "not_found"}
+        return sess
+
+    @app.put("/api/chat/sessions/{session_id}")
+    async def save_chat_session(session_id: str, req: ChatSessionSaveRequest):
+        if not _chat_sessions:
+            return {"error": "sessions_not_initialized"}
+        return _chat_sessions.upsert_session(
+            session_id=session_id,
+            title=req.title,
+            messages=req.messages,
+        )
+
+    @app.delete("/api/chat/sessions/{session_id}")
+    async def delete_chat_session(session_id: str):
+        if not _chat_sessions:
+            return {"error": "sessions_not_initialized"}
+        ok = _chat_sessions.delete_session(session_id)
+        return {"ok": ok}
 
     # -- Search API --
 
@@ -212,36 +266,19 @@ def create_app(controller=None, ws_server=None, trainer=None) -> FastAPI:
         if not _controller or not _controller.ingestion:
             return {"error": "not_initialized"}
 
+        if not getattr(_controller, "ingestion_queue", None):
+            return {"error": "ingestion_queue_not_initialized"}
+
         data = await file.read()
         fname = file.filename or "upload"
         tag_list = [t.strip() for t in tags.split(",") if t.strip()]
-        ext = fname.rsplit(".", 1)[-1].lower() if "." in fname else ""
-
-        if ext == "pdf":
-            result = await _controller.ingestion.ingest_pdf(
-                data, fname, tag_list)
-        elif ext in {"jpg", "jpeg", "png", "webp", "gif", "bmp"}:
-            result = await _controller.ingestion.ingest_image(
-                data, fname, concept_hint, tag_list)
-        elif ext in {"txt", "md", "rst", "csv", "html", "htm", "json", "docx", "doc"}:
-            result = await _controller.ingestion.ingest_text(
-                data, fname, tag_list)
-        else:
-            result = await _controller.ingestion.ingest_text(
-                data, fname, tag_list)
-
-        return {
-            "source": result.source,
-            "source_type": result.source_type,
-            "chunks_total": result.chunks_total,
-            "chunks_stored": result.chunks_stored,
-            "chunks_rejected": result.chunks_rejected,
-            "images_stored": result.images_stored,
-            "concepts_created": result.concepts_created,
-            "duration_s": round(result.duration_s, 2),
-            "success": result.success,
-            "error": result.error,
-        }
+        queued = await _controller.ingestion_queue.enqueue_file(
+            data=data,
+            filename=fname,
+            tags=tag_list,
+            concept_hint=concept_hint,
+        )
+        return {"queued": True, **queued}
 
     @app.get("/api/knowledge/history")
     async def knowledge_history():
@@ -253,19 +290,10 @@ def create_app(controller=None, ws_server=None, trainer=None) -> FastAPI:
     async def knowledge_url(req: KnowledgeUrlRequest):
         if not _controller or not _controller.ingestion:
             return {"error": "not_initialized"}
-        result = await _controller.ingestion.ingest_url(req.url, req.tags)
-        return {
-            "source": result.source,
-            "source_type": result.source_type,
-            "chunks_total": result.chunks_total,
-            "chunks_stored": result.chunks_stored,
-            "chunks_rejected": result.chunks_rejected,
-            "images_stored": result.images_stored,
-            "concepts_created": result.concepts_created,
-            "duration_s": round(result.duration_s, 2),
-            "success": result.success,
-            "error": result.error,
-        }
+        if not getattr(_controller, "ingestion_queue", None):
+            return {"error": "ingestion_queue_not_initialized"}
+        queued = await _controller.ingestion_queue.enqueue_url(req.url, req.tags)
+        return {"queued": True, **queued}
 
     @app.post("/api/cleanup")
     async def cleanup_garbage():

@@ -12,6 +12,7 @@ services:
       - HF_HOME=/app/models/cache
       - TORCH_HOME=/app/models/cache
       - AUTO_TRAIN_ON_START=1
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
     ports:
       - "8000:8000"
     volumes:
@@ -20,6 +21,8 @@ services:
       - model-cache:/app/models/cache
     depends_on:
       mongo:
+        condition: service_started
+      rabbitmq:
         condition: service_started
     deploy:
       resources:
@@ -44,6 +47,16 @@ services:
     volumes:
       - mongo-data:/data/db
 
+  rabbitmq:
+    image: rabbitmq:3-management
+    restart: unless-stopped
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+
 volumes:
   mongo-data:
   model-cache:
+  rabbitmq-data:

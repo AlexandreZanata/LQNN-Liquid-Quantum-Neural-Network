@@ -15,7 +15,11 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import queue
+import threading
 import time
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -28,6 +32,7 @@ log = logging.getLogger(__name__)
 
 IMAGE_WEIGHT = 0.7
 TEXT_WEIGHT = 0.3
+EMBED_CACHE_SIZE = 2048
 
 
 @dataclass
@@ -74,6 +79,45 @@ class AssociativeMemory:
         self.llm = llm
         self._learn_count = 0
         self._query_count = 0
+        self._embed_cache: OrderedDict[str, np.ndarray] = OrderedDict()
+        self._assoc_bg_queue: queue.Queue = queue.Queue(maxsize=500)
+        self._assoc_bg_thread: threading.Thread | None = None
+        self._assoc_bg_running = False
+        self._pool = ThreadPoolExecutor(max_workers=2)
+        self._start_bg_association_worker()
+
+    def _cached_encode_text(self, text: str) -> np.ndarray:
+        """CLIP text encoding with LRU cache."""
+        key = text[:512]
+        if key in self._embed_cache:
+            self._embed_cache.move_to_end(key)
+            return self._embed_cache[key]
+        vec = self.clip.encode_text(key)
+        self._embed_cache[key] = vec
+        if len(self._embed_cache) > EMBED_CACHE_SIZE:
+            self._embed_cache.popitem(last=False)
+        return vec
+
+    def _start_bg_association_worker(self) -> None:
+        """Background thread that processes deferred association generation."""
+        if self._assoc_bg_thread and self._assoc_bg_thread.is_alive():
+            return
+        self._assoc_bg_running = True
+        self._assoc_bg_thread = threading.Thread(
+            target=self._bg_association_loop, daemon=True,
+            name="assoc-bg-worker",
+        )
+        self._assoc_bg_thread.start()
+
+    def _bg_association_loop(self) -> None:
+        while self._assoc_bg_running:
+            try:
+                concept, primary_vec, n = self._assoc_bg_queue.get(timeout=2.0)
+                self._generate_associations_sync(concept, primary_vec, n)
+            except queue.Empty:
+                continue
+            except Exception as e:
+                log.debug("BG association error: %s", e)
 
     # -- Learning --
 
@@ -89,7 +133,7 @@ class AssociativeMemory:
         concept_lower = concept.strip().lower()
         concept_id = self._make_id(concept_lower)
 
-        text_vec = self.clip.encode_text(concept_lower)
+        text_vec = self._cached_encode_text(concept_lower)
 
         if image is not None:
             img_vec = self.clip.encode_image(image)
@@ -108,17 +152,24 @@ class AssociativeMemory:
         )
         self.store.add_concept(entry)
 
-        associations = self._generate_associations(concept_lower, primary_vec)
+        immediate = self._generate_associations_sync(
+            concept_lower, primary_vec, n=5)
+
+        try:
+            self._assoc_bg_queue.put_nowait(
+                (concept_lower, primary_vec, 25))
+        except queue.Full:
+            pass
 
         self._learn_count += 1
         log.info(
-            "Learned '%s' with %d associations (source=%s)",
-            concept_lower, len(associations), source,
+            "Learned '%s' with %d immediate associations (source=%s)",
+            concept_lower, len(immediate), source,
         )
         return QuantumState(
             concept=concept_lower,
             primary_vector=primary_vec,
-            associations=associations,
+            associations=immediate,
             volatility=1.0,
             confidence=initial_confidence,
         )
@@ -134,7 +185,7 @@ class AssociativeMemory:
         concept_lower = concept.strip().lower()
         concept_id = self._make_id(concept_lower)
 
-        text_vec = self.clip.encode_text(concept_lower)
+        text_vec = self._cached_encode_text(concept_lower)
 
         img_vecs = []
         for img in images:
@@ -164,17 +215,23 @@ class AssociativeMemory:
         )
         self.store.add_concept(entry)
 
-        associations = self._generate_associations(concept_lower, primary_vec)
+        immediate = self._generate_associations_sync(
+            concept_lower, primary_vec, n=5)
+        try:
+            self._assoc_bg_queue.put_nowait(
+                (concept_lower, primary_vec, 25))
+        except queue.Full:
+            pass
 
         self._learn_count += 1
         log.info(
-            "Learned '%s' from %d images with %d associations",
-            concept_lower, len(img_vecs), len(associations),
+            "Learned '%s' from %d images with %d immediate associations",
+            concept_lower, len(img_vecs), len(immediate),
         )
         return QuantumState(
             concept=concept_lower,
             primary_vector=primary_vec,
-            associations=associations,
+            associations=immediate,
             volatility=0.8,
             confidence=confidence,
         )
@@ -205,8 +262,14 @@ class AssociativeMemory:
 
     def _generate_associations(self, concept: str,
                                primary_vec: np.ndarray) -> list[dict]:
-        """Generate and store association vectors for a concept."""
-        assoc_words = self.llm.extract_associations(concept, n=30)
+        """Full 30-association generation (used by self-play, agents)."""
+        return self._generate_associations_sync(concept, primary_vec, n=30)
+
+    def _generate_associations_sync(self, concept: str,
+                                    primary_vec: np.ndarray,
+                                    n: int = 30) -> list[dict]:
+        """Generate and store N association vectors for a concept."""
+        assoc_words = self.llm.extract_associations(concept, n=n)
         associations = []
 
         if assoc_words:
@@ -231,34 +294,36 @@ class AssociativeMemory:
     def query(self, question: str, n_results: int = 10) -> CollapseResult:
         """Collapse the quantum state to answer a question.
 
-        1. Encode the question with CLIP
-        2. Find nearest concept vectors
-        3. Retrieve associations for those concepts
-        4. Build context from matched knowledge
-        5. Return collapsed result with confidence
+        Uses cached CLIP encoding and parallel Chroma queries for speed.
         """
-        query_vec = self.clip.encode_text(question)
+        query_vec = self._cached_encode_text(question)
 
-        concepts = self.store.query_concepts(query_vec, n=n_results)
+        fut_concepts = self._pool.submit(
+            self.store.query_concepts, query_vec, n_results)
+        fut_assocs = self._pool.submit(
+            self.store.query_associations, query_vec, n_results * 2)
 
-        for c in concepts:
-            cid = c.get("id", "")
-            meta = c.get("metadata", {})
-            self.store.update_metadata(cid, {
-                "access_count": meta.get("access_count", 0) + 1,
-                "last_accessed": time.time(),
-            })
+        concepts = fut_concepts.result()
+        assoc_results = fut_assocs.result()
 
-        assoc_results = self.store.query_associations(query_vec, n=n_results * 2)
+        self.store.batch_touch(
+            [c.get("id", "") for c in concepts],
+            [c.get("metadata", {}) for c in concepts],
+        )
 
         context_parts = []
-        for c in concepts[:5]:
+        for c in concepts[:3]:
             doc = c.get("document", "")
+            meta = c.get("metadata", {})
+            full_text = meta.get("full_text", "")
             dist = c.get("distance", 1.0)
-            if doc:
+            if full_text:
+                context_parts.append(
+                    f"- {full_text[:400]} (relevance: {1 - dist:.2f})")
+            elif doc:
                 context_parts.append(f"- {doc} (relevance: {1 - dist:.2f})")
 
-        for a in assoc_results[:10]:
+        for a in assoc_results[:5]:
             doc = a.get("document", "")
             if doc:
                 context_parts.append(f"- {doc}")
@@ -418,7 +483,7 @@ class AssociativeMemory:
 
                     if quality < 5.0 and count > 10:
                         new_assocs = self._generate_associations(
-                            concept, self.clip.encode_text(concept))
+                            concept, self._cached_encode_text(concept))
                         return {
                             "action": "reinforced",
                             "concept": concept,
@@ -440,7 +505,7 @@ class AssociativeMemory:
 
         if collapse.confidence < 0.5 and count > 10:
             new_assocs = self._generate_associations(
-                concept, self.clip.encode_text(concept))
+                concept, self._cached_encode_text(concept))
             return {
                 "action": "reinforced",
                 "concept": concept,

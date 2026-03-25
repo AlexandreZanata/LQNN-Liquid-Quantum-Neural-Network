@@ -2,6 +2,14 @@ const WS_URL = `ws://${location.host}/ws`;
 let socket = null;
 let reconnectTimer = null;
 let lastModelRuntimeState = null;
+let chatSessions = [];
+let currentSessionId = null;
+let currentMessages = [];
+let streamingDiv = null;
+let streamingText = "";
+let reasoningDiv = null;
+let pendingDeleteId = null;
+let sidebarOpen = true;
 
 function connect() {
   socket = new WebSocket(WS_URL);
@@ -50,8 +58,12 @@ function handleMessage(data) {
     updateAgentLog(data.agent_activity || []);
     updateConcepts(data.recent_concepts || []);
     updateSystemMetrics(data.system || {});
+  } else if (data.type === "chat_reasoning") {
+    handleReasoning(data.step);
+  } else if (data.type === "chat_token") {
+    handleStreamToken(data.token);
   } else if (data.type === "chat_response") {
-    appendChat("assistant", data.response, data);
+    finalizeStream(data);
   } else if (data.type === "search_result") {
     appendSystem(
       `SEARCH complete: ${data.concepts_learned} concepts, ` +
@@ -77,8 +89,124 @@ function handleMessage(data) {
 }
 
 function handleLiveEvent(ev) {
-  const evType = ev.type === "live_event" ? (ev.type_detail || ev.type) : ev.type;
   addAgentEntry(ev);
+}
+
+// -- REASONING + STREAMING --
+
+function handleReasoning(step) {
+  const output = document.getElementById("chat-output");
+
+  if (!reasoningDiv) {
+    reasoningDiv = document.createElement("div");
+    reasoningDiv.className = "reasoning-block";
+    reasoningDiv.id = "active-reasoning";
+
+    const header = document.createElement("div");
+    header.className = "reasoning-header";
+    header.innerHTML = '<span class="reasoning-icon">⚡</span> <span class="reasoning-label">QUANTUM REASONING</span>';
+    reasoningDiv.appendChild(header);
+
+    const steps = document.createElement("div");
+    steps.className = "reasoning-steps";
+    steps.id = "reasoning-steps";
+    reasoningDiv.appendChild(steps);
+
+    output.appendChild(reasoningDiv);
+  }
+
+  const stepsContainer = document.getElementById("reasoning-steps");
+  if (stepsContainer) {
+    const stepEl = document.createElement("div");
+    stepEl.className = "reasoning-step";
+    stepEl.textContent = step;
+    stepsContainer.appendChild(stepEl);
+  }
+
+  output.scrollTop = output.scrollHeight;
+}
+
+function handleStreamToken(token) {
+  if (reasoningDiv) {
+    reasoningDiv.classList.add("reasoning-complete");
+  }
+
+  if (!streamingDiv) {
+    const output = document.getElementById("chat-output");
+    streamingDiv = document.createElement("div");
+    streamingDiv.className = "chat-msg assistant";
+
+    const header = document.createElement("div");
+    header.className = "msg-header";
+    header.innerHTML =
+      `<span class="msg-avatar assistant-avatar">$</span>` +
+      `<span class="msg-timestamp">${nowTimestamp()}</span>`;
+    streamingDiv.appendChild(header);
+
+    const body = document.createElement("div");
+    body.className = "msg-body streaming-cursor";
+    body.id = "streaming-body";
+    streamingDiv.appendChild(body);
+
+    output.appendChild(streamingDiv);
+    streamingText = "";
+  }
+
+  streamingText += token;
+  const body = document.getElementById("streaming-body");
+  if (body) {
+    renderRichContent(body, streamingText);
+  }
+
+  const output = document.getElementById("chat-output");
+  output.scrollTop = output.scrollHeight;
+}
+
+function finalizeStream(data) {
+  if (reasoningDiv) {
+    reasoningDiv.classList.add("reasoning-complete");
+    reasoningDiv = null;
+  }
+
+  if (streamingDiv) {
+    const body = document.getElementById("streaming-body");
+    if (body) {
+      body.classList.remove("streaming-cursor");
+      const fullText = data.response || streamingText;
+      renderRichContent(body, fullText);
+
+      const copyBtn = document.createElement("button");
+      copyBtn.className = "msg-copy-btn";
+      copyBtn.textContent = "COPY";
+      copyBtn.addEventListener("click", () => copyFullResponse(fullText, copyBtn));
+      const header = streamingDiv.querySelector(".msg-header");
+      if (header) header.appendChild(copyBtn);
+    }
+
+    if (data.confidence !== undefined || data.concepts) {
+      const metaDiv = document.createElement("div");
+      metaDiv.className = "meta";
+      const parts = [];
+      if (data.confidence !== undefined) parts.push(`confidence: ${data.confidence}`);
+      if (data.concepts && data.concepts.length) parts.push(`concepts: ${data.concepts.join(", ")}`);
+      if (data.duration_ms !== undefined) parts.push(`${data.duration_ms}ms`);
+      metaDiv.textContent = parts.join(" | ");
+      streamingDiv.appendChild(metaDiv);
+    }
+
+    currentMessages.push({
+      role: "assistant",
+      text: data.response || streamingText,
+      meta: { confidence: data.confidence, concepts: data.concepts, duration_ms: data.duration_ms },
+      timestamp: Date.now(),
+    });
+    saveCurrentSession().catch(() => {});
+
+    streamingDiv = null;
+    streamingText = "";
+  } else {
+    appendChat("assistant", data.response, data);
+  }
 }
 
 // -- STATS UPDATE --
@@ -290,11 +418,41 @@ function volColor(v) {
 
 // -- CHAT OUTPUT --
 
-function appendChat(role, text, meta = null) {
+function appendChat(role, text, meta = null, persist = true) {
   const output = document.getElementById("chat-output");
   const div = document.createElement("div");
   div.className = `chat-msg ${role}`;
-  div.textContent = text;
+
+  const header = document.createElement("div");
+  header.className = "msg-header";
+
+  if (role === "user") {
+    header.innerHTML =
+      `<span class="msg-avatar user-avatar">&gt;</span>` +
+      `<span class="msg-timestamp">${nowTimestamp()}</span>`;
+  } else if (role === "assistant") {
+    header.innerHTML =
+      `<span class="msg-avatar assistant-avatar">$</span>` +
+      `<span class="msg-timestamp">${nowTimestamp()}</span>`;
+
+    const copyBtn = document.createElement("button");
+    copyBtn.className = "msg-copy-btn";
+    copyBtn.textContent = "COPY";
+    copyBtn.addEventListener("click", () => copyFullResponse(text, copyBtn));
+    header.appendChild(copyBtn);
+  }
+
+  div.appendChild(header);
+
+  const body = document.createElement("div");
+  body.className = "msg-body";
+
+  if (role === "assistant") {
+    renderRichContent(body, text);
+  } else {
+    body.textContent = text;
+  }
+  div.appendChild(body);
 
   if (meta && role === "assistant") {
     const metaDiv = document.createElement("div");
@@ -312,6 +470,15 @@ function appendChat(role, text, meta = null) {
 
   output.appendChild(div);
   output.scrollTop = output.scrollHeight;
+  if (persist && (role === "user" || role === "assistant")) {
+    currentMessages.push({
+      role,
+      text,
+      meta: meta || {},
+      timestamp: Date.now(),
+    });
+    saveCurrentSession().catch(() => {});
+  }
 }
 
 function appendSystem(text) {
@@ -332,11 +499,298 @@ function appendError(text) {
   output.scrollTop = output.scrollHeight;
 }
 
+// -- RICH CONTENT RENDERING --
+
+function renderRichContent(container, text) {
+  container.innerHTML = "";
+  const fenceRe = /```([a-zA-Z0-9_+-]*)\n?([\s\S]*?)```/g;
+  let last = 0;
+  let m;
+  while ((m = fenceRe.exec(text)) !== null) {
+    const plain = text.slice(last, m.index);
+    if (plain.trim()) {
+      renderMarkdownBlock(container, plain.trim());
+    }
+    const lang = (m[1] || "code").trim();
+    const code = m[2] || "";
+    container.appendChild(buildCodeBlock(lang, code));
+    last = fenceRe.lastIndex;
+  }
+  const tail = text.slice(last);
+  if (tail.trim() || !container.children.length) {
+    renderMarkdownBlock(container, tail.trim() || text);
+  }
+}
+
+function renderMarkdownBlock(container, text) {
+  const lines = text.split("\n");
+  let html = "";
+  for (const line of lines) {
+    let processed = escapeHtml(line);
+
+    if (/^#{1,3}\s+/.test(line)) {
+      const level = line.match(/^(#{1,3})/)[1].length;
+      const content = processed.replace(/^#{1,3}\s+/, '');
+      processed = `<span class="md-h${level}">${content}</span>`;
+      html += processed + "\n";
+      continue;
+    }
+
+    processed = processed.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    processed = processed.replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>');
+    processed = processed.replace(/\\\((.+?)\\\)/g, '<span class="math-inline">$1</span>');
+    processed = processed.replace(/\\\[(.+?)\\\]/g, '<div class="math-block">$1</div>');
+
+    if (/^\s*\d+\.\s+/.test(line)) {
+      const content = processed.replace(/^\s*\d+\.\s+/, '');
+      const num = line.match(/^\s*(\d+)\./)[1];
+      processed = `<span class="md-num-item"><span class="md-num">${num}.</span> ${content}</span>`;
+    } else if (/^\s*[-*]\s+/.test(line)) {
+      processed = '<span class="md-list-item">' +
+        processed.replace(/^\s*[-*]\s+/, '') + '</span>';
+    }
+
+    if (/^\s*---\s*$/.test(line)) {
+      processed = '<hr class="md-hr">';
+    }
+
+    html += processed + "\n";
+  }
+  const p = document.createElement("div");
+  p.className = "chat-text";
+  p.innerHTML = html;
+  container.appendChild(p);
+}
+
+function buildCodeBlock(lang, code) {
+  const wrap = document.createElement("div");
+  wrap.className = "code-block";
+
+  const header = document.createElement("div");
+  header.className = "code-header";
+  const langSpan = document.createElement("span");
+  langSpan.textContent = lang.toUpperCase();
+  const btn = document.createElement("button");
+  btn.className = "code-copy-btn";
+  btn.textContent = "COPY";
+  btn.addEventListener("click", async () => {
+    await copyCode(code, btn);
+  });
+  header.appendChild(langSpan);
+  header.appendChild(btn);
+
+  const pre = document.createElement("pre");
+  pre.className = "code-pre";
+  const c = document.createElement("code");
+  c.textContent = code;
+  pre.appendChild(c);
+
+  wrap.appendChild(header);
+  wrap.appendChild(pre);
+  return wrap;
+}
+
+async function copyCode(code, button) {
+  try {
+    await navigator.clipboard.writeText(code);
+    const old = button.textContent;
+    button.textContent = "COPIED";
+    setTimeout(() => { button.textContent = old; }, 1200);
+  } catch (_) {
+    button.textContent = "FAILED";
+    setTimeout(() => { button.textContent = "COPY"; }, 1200);
+  }
+}
+
+async function copyFullResponse(text, button) {
+  try {
+    await navigator.clipboard.writeText(text);
+    const old = button.textContent;
+    button.textContent = "COPIED";
+    setTimeout(() => { button.textContent = old; }, 1200);
+  } catch (_) {
+    button.textContent = "FAILED";
+    setTimeout(() => { button.textContent = "COPY"; }, 1200);
+  }
+}
+
+// -- CHAT SESSIONS --
+
+async function loadSessions() {
+  const resp = await fetch("/api/chat/sessions");
+  const data = await resp.json();
+  chatSessions = Array.isArray(data) ? data : [];
+  if (!chatSessions.length) {
+    await createSession("New chat");
+    return;
+  }
+  currentSessionId = chatSessions[0].id;
+  renderSessionList();
+  await openSession(currentSessionId);
+}
+
+function renderSessionList() {
+  const container = document.getElementById("session-list");
+  if (!container) return;
+  container.innerHTML = "";
+  for (const s of chatSessions) {
+    const item = document.createElement("div");
+    item.className = "session-item" + (s.id === currentSessionId ? " active" : "");
+    item.dataset.id = s.id;
+
+    const content = document.createElement("div");
+    content.className = "session-item-content";
+
+    const title = document.createElement("div");
+    title.className = "session-item-title";
+    title.textContent = truncate(s.title || "New chat", 24);
+
+    const meta = document.createElement("div");
+    meta.className = "session-item-meta";
+    const count = s.message_count || 0;
+    const dateStr = s.updated_at ? new Date(s.updated_at * 1000).toLocaleDateString("en-GB", {
+      day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit"
+    }) : "";
+    meta.textContent = `${count} msgs ${dateStr ? "· " + dateStr : ""}`;
+
+    content.appendChild(title);
+    content.appendChild(meta);
+
+    const delBtn = document.createElement("button");
+    delBtn.className = "session-item-delete";
+    delBtn.textContent = "✕";
+    delBtn.title = "Delete session";
+    delBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      showDeleteModal(s.id, s.title || "New chat");
+    });
+
+    item.appendChild(content);
+    item.appendChild(delBtn);
+
+    item.addEventListener("click", () => {
+      if (s.id !== currentSessionId) {
+        openSession(s.id);
+      }
+    });
+
+    container.appendChild(item);
+  }
+}
+
+async function createSession(title = "New chat") {
+  const resp = await fetch("/api/chat/sessions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title }),
+  });
+  const created = await resp.json();
+  await refreshSessions();
+  currentSessionId = created.id;
+  renderSessionList();
+  await openSession(currentSessionId);
+}
+
+async function openSession(sessionId) {
+  const resp = await fetch(`/api/chat/sessions/${sessionId}`);
+  const data = await resp.json();
+  currentSessionId = sessionId;
+  currentMessages = Array.isArray(data.messages) ? data.messages : [];
+  const output = document.getElementById("chat-output");
+  output.innerHTML = "";
+  for (const msg of currentMessages) {
+    appendChat(msg.role, msg.text, msg.meta || null, false);
+  }
+  renderSessionList();
+}
+
+async function saveCurrentSession() {
+  if (!currentSessionId) return;
+  const firstUser = currentMessages.find((m) => m.role === "user");
+  const title = firstUser ? firstUser.text.slice(0, 40) : "New chat";
+  await fetch(`/api/chat/sessions/${currentSessionId}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      title,
+      messages: currentMessages,
+    }),
+  });
+  await refreshSessions();
+  renderSessionList();
+}
+
+async function refreshSessions() {
+  const resp = await fetch("/api/chat/sessions");
+  const data = await resp.json();
+  chatSessions = Array.isArray(data) ? data : [];
+}
+
+async function deleteSession(sessionId) {
+  await fetch(`/api/chat/sessions/${sessionId}`, { method: "DELETE" });
+  await refreshSessions();
+  if (!chatSessions.length) {
+    await createSession("New chat");
+    return;
+  }
+  if (currentSessionId === sessionId) {
+    currentSessionId = chatSessions[0].id;
+    await openSession(currentSessionId);
+  }
+  renderSessionList();
+}
+
+// -- DELETE MODAL --
+
+function showDeleteModal(sessionId, sessionTitle) {
+  pendingDeleteId = sessionId;
+  const modal = document.getElementById("delete-modal");
+  const body = document.getElementById("delete-modal-body");
+  body.innerHTML = `Permanently delete session <span class="modal-session-name">"${escapeHtml(truncate(sessionTitle, 30))}"</span>?<br>This cannot be undone.`;
+  modal.classList.add("visible");
+}
+
+function hideDeleteModal() {
+  pendingDeleteId = null;
+  document.getElementById("delete-modal").classList.remove("visible");
+}
+
+document.getElementById("modal-cancel").addEventListener("click", hideDeleteModal);
+document.getElementById("modal-confirm").addEventListener("click", async () => {
+  if (pendingDeleteId) {
+    await deleteSession(pendingDeleteId);
+  }
+  hideDeleteModal();
+});
+document.getElementById("delete-modal").addEventListener("click", (e) => {
+  if (e.target === e.currentTarget) hideDeleteModal();
+});
+
+// -- SIDEBAR TOGGLE --
+
+function toggleSidebar() {
+  const sidebar = document.getElementById("chat-sidebar");
+  sidebarOpen = !sidebarOpen;
+  if (sidebarOpen) {
+    sidebar.classList.remove("collapsed");
+  } else {
+    sidebar.classList.add("collapsed");
+  }
+}
+
 // -- UTILITIES --
 
 function setText(id, text) {
   const el = document.getElementById(id);
   if (el) el.textContent = text;
+}
+
+function truncate(str, n) {
+  return str.length > n ? str.slice(0, n) + "…" : str;
+}
+
+function nowTimestamp() {
+  return new Date().toLocaleTimeString("en-GB", { hour12: false });
 }
 
 function formatUptime(s) {
@@ -385,10 +839,17 @@ document.getElementById("chat-input").addEventListener("keydown", (e) => {
     const input = document.getElementById("chat-input");
     const text = input.value.trim();
     if (!text) return;
+    if (!currentSessionId) return;
     appendChat("user", text);
-    sendAction("chat", { text });
+    sendAction("chat_stream", { text });
     input.value = "";
   }
+});
+
+document.getElementById("btn-toggle-sidebar").addEventListener("click", toggleSidebar);
+
+document.getElementById("btn-new-session").addEventListener("click", async () => {
+  await createSession("New chat");
 });
 
 document.getElementById("btn-consolidate").addEventListener("click", () => {
@@ -420,3 +881,6 @@ document.getElementById("btn-stop-train").addEventListener("click", () => {
 // -- INIT --
 appendSystem("Initializing quantum brain terminal...");
 connect();
+loadSessions().catch((e) => {
+  appendError(`Failed to load chat sessions: ${e.message || e}`);
+});

@@ -120,6 +120,42 @@ class WebSocketStateServer:
                 )
                 await ws.send_json({"type": "chat_response", **result})
 
+            elif action == "chat_stream":
+                text = data.get("text", "")
+                loop = asyncio.get_event_loop()
+                msg_queue: asyncio.Queue[tuple[str, str] | None] = asyncio.Queue()
+
+                def _on_token(chunk: str) -> None:
+                    loop.call_soon_threadsafe(
+                        msg_queue.put_nowait, ("token", chunk))
+
+                def _on_reasoning(step: str) -> None:
+                    loop.call_soon_threadsafe(
+                        msg_queue.put_nowait, ("reasoning", step))
+
+                async def _send_messages() -> None:
+                    while True:
+                        item = await msg_queue.get()
+                        if item is None:
+                            break
+                        kind, val = item
+                        try:
+                            if kind == "token":
+                                await ws.send_json({"type": "chat_token", "token": val})
+                            elif kind == "reasoning":
+                                await ws.send_json({"type": "chat_reasoning", "step": val})
+                        except Exception:
+                            break
+
+                sender_task = asyncio.create_task(_send_messages())
+                result = await asyncio.to_thread(
+                    self.controller.chat_engine.chat_stream,
+                    text, _on_token, _on_reasoning,
+                )
+                loop.call_soon_threadsafe(msg_queue.put_nowait, None)
+                await sender_task
+                await ws.send_json({"type": "chat_response", **result})
+
             elif action == "search":
                 result = await self.controller.search(data.get("query", ""))
                 await ws.send_json({"type": "search_result", **result})
@@ -159,22 +195,14 @@ class WebSocketStateServer:
                 tags = data.get("tags", [])
                 if not url:
                     await ws.send_json({"type": "error", "message": "url required"})
-                elif not self.controller.ingestion:
-                    await ws.send_json({"type": "error", "message": "ingestion not ready"})
+                elif not getattr(self.controller, "ingestion_queue", None):
+                    await ws.send_json({"type": "error", "message": "ingestion queue not ready"})
                 else:
-                    result = await self.controller.ingestion.ingest_url(url, tags)
+                    result = await self.controller.ingestion_queue.enqueue_url(url, tags)
                     await ws.send_json({
-                        "type": "kb_ingest_result",
-                        "source": result.source,
-                        "source_type": result.source_type,
-                        "chunks_stored": result.chunks_stored,
-                        "chunks_total": result.chunks_total,
-                        "chunks_rejected": result.chunks_rejected,
-                        "images_stored": result.images_stored,
-                        "concepts_created": result.concepts_created,
-                        "duration_s": round(result.duration_s, 2),
-                        "success": result.success,
-                        "error": result.error,
+                        "type": "kb_queue_result",
+                        "source": result.get("source", url),
+                        "queued": True,
                     })
 
             elif action == "cleanup":

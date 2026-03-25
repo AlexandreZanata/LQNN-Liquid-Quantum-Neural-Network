@@ -24,6 +24,40 @@ logging.basicConfig(
 log = logging.getLogger("lqnn")
 
 
+def _ensure_dir_writable(path: str) -> None:
+    os.makedirs(path, exist_ok=True)
+    probe = os.path.join(path, ".write_probe")
+    try:
+        with open(probe, "w", encoding="utf-8") as f:
+            f.write("ok")
+        os.remove(probe)
+        return
+    except Exception:
+        pass
+
+    for root, dirs, files in os.walk(path):
+        for d in dirs:
+            try:
+                os.chmod(os.path.join(root, d), 0o775)
+            except Exception:
+                pass
+        for fn in files:
+            try:
+                os.chmod(os.path.join(root, fn), 0o664)
+            except Exception:
+                pass
+    try:
+        os.chmod(path, 0o775)
+        with open(probe, "w", encoding="utf-8") as f:
+            f.write("ok")
+        os.remove(probe)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Chroma path is not writable: {path}. "
+            f"Fix permissions for ./data (host) and restart."
+        ) from exc
+
+
 def build_system():
     """Initialize all system components."""
     log.info("=== LQNN v3 - Quantum Associative Brain ===")
@@ -48,7 +82,7 @@ def build_system():
 
     log.info("Initializing vector store (ChromaDB)...")
     chroma_dir = os.environ.get("CHROMA_DIR", "data/chroma")
-    os.makedirs(chroma_dir, exist_ok=True)
+    _ensure_dir_writable(chroma_dir)
     store = VectorStore(persist_dir=chroma_dir)
 
     log.info("Initializing associative memory...")
@@ -91,11 +125,18 @@ def build_system():
 
     log.info("Setting up knowledge ingestion pipeline...")
     from lqnn.ingestion.processor import KnowledgeIngestionPipeline
+    from lqnn.ingestion.rabbit_queue import RabbitIngestionQueue
     ingestion = KnowledgeIngestionPipeline(
         memory=memory,
         event_callback=ws_server.push_event,
     )
     controller.set_ingestion_pipeline(ingestion)
+    rabbitmq_url = os.environ.get("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/")
+    controller.ingestion_queue = RabbitIngestionQueue(
+        rabbitmq_url=rabbitmq_url,
+        ingestion_pipeline=ingestion,
+        event_callback=ws_server.push_event,
+    )
 
     app = create_app(controller=controller, ws_server=ws_server, trainer=trainer)
 

@@ -35,7 +35,7 @@ from lqnn.ingestion.extractors import (
 log = logging.getLogger(__name__)
 
 # Minimum text quality thresholds
-MIN_CHUNK_CHARS = 80
+MIN_CHUNK_CHARS = 40
 MAX_CHUNK_CHARS = 3000
 
 
@@ -253,9 +253,10 @@ class KnowledgeIngestionPipeline:
         if len(text) < MIN_CHUNK_CHARS:
             return False
 
-        # Quality check: must have enough alphabetic content
+        # User-curated sources can include formulas/symbols; keep filter permissive.
         alpha_ratio = sum(c.isalpha() or c.isspace() for c in text) / max(len(text), 1)
-        if alpha_ratio < 0.45:
+        alnum_ratio = sum(c.isalnum() or c.isspace() for c in text) / max(len(text), 1)
+        if alpha_ratio < 0.20 and alnum_ratio < 0.35:
             return False
 
         try:

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from typing import Callable
 
@@ -107,22 +108,31 @@ class ChatEngine:
 
         if collapse.confidence >= self.MIN_CONFIDENCE and collapse.context:
             response = self.llm.answer_with_context(
-                user_text, collapse.context, max_new_tokens=400,
+                user_text, collapse.context, max_new_tokens=300,
             )
         elif collapse.confidence > 0:
             response = self.llm.generate(
-                f"You have very limited knowledge about this topic. "
-                f"What you know: {collapse.context}\n\n"
-                f"Question: {user_text}\n"
-                f"Give a brief, honest answer. Say what you don't know.",
+                f"Partial knowledge:\n{collapse.context}\n\n"
+                f"Question: {user_text}\n\n"
+                f"Answer using the above knowledge combined with your general knowledge. "
+                f"Be helpful and thorough.",
                 max_new_tokens=300,
+                system_prompt=(
+                    "You are LQNN, a quantum associative brain. "
+                    "Answer helpfully using available knowledge and general reasoning. "
+                    "Format with markdown when appropriate."
+                ),
             )
         else:
             response = self.llm.generate(
-                f"You don't have specific knowledge about this topic yet. "
-                f"The user asked: {user_text}\n"
-                f"Give a brief honest answer and mention that you're still learning.",
-                max_new_tokens=200,
+                user_text,
+                max_new_tokens=300,
+                system_prompt=(
+                    "You are LQNN, a quantum associative brain that is always learning. "
+                    "You can answer any question using your general intelligence. "
+                    "Be thorough and well-structured. "
+                    "Format with markdown: **bold**, numbered lists, code blocks."
+                ),
             )
 
         if collapse.confidence < REACTIVE_CONFIDENCE_THRESHOLD:
@@ -134,7 +144,7 @@ class ChatEngine:
                 )
 
         concepts_found = [
-            c.get("document", "") for c in collapse.matched_concepts[:5]
+            c.get("document", "") for c in collapse.matched_concepts[:3]
             if c.get("document")
         ]
 
@@ -163,7 +173,8 @@ class ChatEngine:
             except Exception:
                 pass
 
-        self._maybe_learn(user_text, collapse)
+        # Background learn -- don't block the response
+        self._bg_maybe_learn(user_text, collapse)
 
         return {
             "response": response,
@@ -206,12 +217,154 @@ class ChatEngine:
 
         return False
 
-    def _maybe_learn(self, text: str, collapse: CollapseResult) -> None:
-        """If the query revealed a knowledge gap, learn from the question itself."""
+    def chat_stream(self, user_text: str,
+                    on_token: Callable[[str], None] | None = None,
+                    on_reasoning: Callable[[str], None] | None = None) -> dict:
+        """Streaming chat with real-time reasoning display.
+
+        on_token: called with each generated text chunk
+        on_reasoning: called with each reasoning/thinking step so the UI
+                      can show what the brain is doing in real time
+        """
+        t0 = time.time()
+        user_text = user_text.strip()
+        if not user_text:
+            return {"response": "...", "confidence": 0.0, "concepts": [], "duration_ms": 0}
+
+        if self.llm.loading:
+            return {"response": LLM_LOADING_MSG, "confidence": 0.0, "concepts": [],
+                    "duration_ms": 0, "status": "loading"}
+
+        def _reason(step: str) -> None:
+            if on_reasoning:
+                on_reasoning(step)
+
+        try:
+            _reason("Encoding query with CLIP neural encoder...")
+
+            t_clip = time.time()
+            collapse = self.memory.query(user_text, n_results=10)
+            clip_ms = int((time.time() - t_clip) * 1000)
+
+            _reason(f"Quantum collapse complete ({clip_ms}ms) — "
+                    f"confidence: {collapse.confidence:.2f}, "
+                    f"{len(collapse.matched_concepts)} concepts matched")
+
+            if collapse.matched_concepts:
+                top_concepts = [c.get("document", "")[:60]
+                                for c in collapse.matched_concepts[:3]
+                                if c.get("document")]
+                if top_concepts:
+                    _reason(f"Top associations: {', '.join(top_concepts)}")
+
+            if collapse.confidence >= self.MIN_CONFIDENCE and collapse.context:
+                _reason("High confidence — generating context-grounded response...")
+                system_prompt = (
+                    "You are LQNN, a quantum associative brain with deep knowledge. "
+                    "Answer questions using the provided knowledge context. "
+                    "Use your general intelligence to provide a complete, well-structured answer. "
+                    "If the context is partial, supplement with your reasoning. "
+                    "Format with markdown: use **bold**, numbered lists, code blocks when appropriate."
+                )
+                prompt = f"Knowledge:\n{collapse.context}\n\nQuestion: {user_text}"
+            elif collapse.confidence > 0:
+                _reason("Partial knowledge found — combining context with general reasoning...")
+                system_prompt = (
+                    "You are LQNN, a quantum associative brain. You have some relevant knowledge "
+                    "but it may be incomplete. Answer the question using what you know and your "
+                    "general intelligence. Be helpful and thorough. "
+                    "Format with markdown: use **bold**, numbered lists, code blocks when appropriate."
+                )
+                prompt = (
+                    f"Partial knowledge:\n{collapse.context}\n\n"
+                    f"Question: {user_text}\n\n"
+                    f"Answer using the above knowledge combined with your general knowledge."
+                )
+            else:
+                _reason("No specific knowledge — using general LLM capabilities...")
+                system_prompt = (
+                    "You are LQNN, a quantum associative brain that is always learning. "
+                    "You don't have specific stored knowledge about this topic yet, "
+                    "but you can still help using your general intelligence. "
+                    "Give a thorough, well-structured answer. "
+                    "Format with markdown: use **bold**, numbered lists, code blocks when appropriate."
+                )
+                prompt = user_text
+
+            _reason("Generating response tokens...")
+
+            full_response = []
+            for chunk in self.llm.generate_stream(
+                prompt, max_new_tokens=300, temperature=0.4,
+                system_prompt=system_prompt,
+            ):
+                full_response.append(chunk)
+                if on_token:
+                    on_token(chunk)
+
+            response = "".join(full_response).strip()
+
+            learning_triggered = False
+            if collapse.confidence < REACTIVE_CONFIDENCE_THRESHOLD:
+                _reason("Low confidence detected — triggering reactive learning...")
+                learning_triggered = self._trigger_reactive_learning(user_text)
+                if learning_triggered:
+                    suffix = ("\n\n[ LEARNING ] I'm actively searching for more "
+                              "information about this topic. Ask me again soon!")
+                    response += suffix
+                    if on_token:
+                        on_token(suffix)
+                    _reason("Reactive search queued for background learning")
+
+            concepts_found = [
+                c.get("document", "") for c in collapse.matched_concepts[:3]
+                if c.get("document")
+            ]
+            duration_ms = int((time.time() - t0) * 1000)
+            _reason(f"Response complete in {duration_ms}ms")
+
+            turn = {
+                "role": "user", "text": user_text, "response": response,
+                "confidence": round(collapse.confidence, 3),
+                "concepts": concepts_found, "timestamp": time.time(),
+            }
+            self._chat_history.append(turn)
+            if len(self._chat_history) > 200:
+                self._chat_history = self._chat_history[-100:]
+
+            self._bg_maybe_learn(user_text, collapse)
+
+            return {
+                "response": response,
+                "confidence": round(collapse.confidence, 3),
+                "concepts": concepts_found,
+                "associations": len(collapse.associations),
+                "duration_ms": duration_ms,
+                "status": "ok",
+                "learning_triggered": learning_triggered,
+            }
+        except Exception as exc:
+            log.error("Chat stream error: %s", exc, exc_info=True)
+            return {
+                "response": f"[ NEURAL ERROR ] {type(exc).__name__}",
+                "confidence": 0.0, "concepts": [],
+                "duration_ms": int((time.time() - t0) * 1000),
+                "status": "error",
+            }
+
+    def _bg_maybe_learn(self, text: str, collapse: CollapseResult) -> None:
+        """Fire-and-forget background learning so the response is instant."""
         if collapse.confidence < 0.2:
             words = text.split()
             if 1 <= len(words) <= 5:
-                try:
-                    self.memory.learn_concept(text, source="user_query")
-                except Exception:
-                    pass
+                threading.Thread(
+                    target=self._maybe_learn_sync,
+                    args=(text,),
+                    daemon=True,
+                ).start()
+
+    def _maybe_learn_sync(self, text: str) -> None:
+        try:
+            self.memory.learn_concept(text, source="user_query")
+        except Exception:
+            pass

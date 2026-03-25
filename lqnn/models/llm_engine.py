@@ -83,6 +83,55 @@ class LLMEngine:
         )
         return decoded.strip()
 
+    def generate_stream(self, prompt: str, max_new_tokens: int = 200,
+                        temperature: float = 0.4, top_p: float = 0.9,
+                        system_prompt: str | None = None):
+        """Generate tokens with streaming via TextIteratorStreamer.
+
+        Yields text chunks as they are produced. First token arrives fast,
+        rest flows progressively.
+        """
+        if not self._ready:
+            self.load()
+
+        from transformers import TextIteratorStreamer
+
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
+        text = self._tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True,
+        )
+        inputs = self._tokenizer(text, return_tensors="pt").to(self._model.device)
+
+        streamer = TextIteratorStreamer(
+            self._tokenizer, skip_prompt=True, skip_special_tokens=True,
+        )
+
+        gen_kwargs = dict(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            do_sample=temperature > 0,
+            streamer=streamer,
+        )
+
+        thread = threading.Thread(
+            target=self._model.generate,
+            kwargs=gen_kwargs,
+            daemon=True,
+        )
+        thread.start()
+
+        for chunk in streamer:
+            if chunk:
+                yield chunk
+
+        thread.join(timeout=120)
+
     def extract_associations(self, concept: str, n: int = 30) -> list[str]:
         """Generate categorized associations for a concept.
 
@@ -123,11 +172,13 @@ class LLMEngine:
 
     def answer_with_context(self, question: str, context: str,
                             max_new_tokens: int = 300) -> str:
-        """Answer a question grounded on retrieved context."""
+        """Answer a question grounded on retrieved context, supplemented by general knowledge."""
         system_prompt = (
-            "You are a quantum associative brain. Answer questions using ONLY "
-            "the provided knowledge context. If the knowledge is insufficient, "
-            "say so honestly. Be concise and accurate."
+            "You are LQNN, a quantum associative brain with deep knowledge. "
+            "Answer questions using the provided knowledge context as your primary source. "
+            "If the context is partial, supplement with your general reasoning to give "
+            "a complete, helpful answer. Format with markdown: use **bold** for emphasis, "
+            "numbered lists for steps, and code blocks for code."
         )
         prompt = (
             f"Knowledge:\n{context}\n\n"

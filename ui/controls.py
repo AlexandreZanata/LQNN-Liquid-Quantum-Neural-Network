@@ -149,6 +149,7 @@ class UIController:
         self.trainer = trainer
         self.agent_manager = agent_manager
         self.ingestion: KnowledgeIngestionPipeline | None = None
+        self.ingestion_queue = None
 
     def set_ingestion_pipeline(self, pipeline: KnowledgeIngestionPipeline) -> None:
         self.ingestion = pipeline

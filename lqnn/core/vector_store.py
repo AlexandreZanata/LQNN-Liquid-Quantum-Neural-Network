@@ -83,12 +83,20 @@ class VectorStore:
         if max_volatility is not None:
             where = {"volatility": {"$lte": max_volatility}}
 
-        results = self._concepts.query(
-            query_embeddings=[vector.tolist()],
-            n_results=min(n, max(self._concepts.count(), 1)),
-            where=where,
-            include=["metadatas", "documents", "distances", "embeddings"],
-        )
+        try:
+            results = self._concepts.query(
+                query_embeddings=[vector.tolist()],
+                n_results=n,
+                where=where,
+                include=["metadatas", "documents", "distances"],
+            )
+        except Exception:
+            results = self._concepts.query(
+                query_embeddings=[vector.tolist()],
+                n_results=max(self._concepts.count(), 1),
+                where=where,
+                include=["metadatas", "documents", "distances"],
+            )
         return self._unpack(results)
 
     def get_concept(self, concept_id: str) -> dict | None:
@@ -121,6 +129,27 @@ class VectorStore:
         meta.update(updates)
         self._concepts.update(ids=[concept_id], metadatas=[meta])
 
+    def batch_touch(self, ids: list[str], metas: list[dict]) -> None:
+        """Batch-update access_count and last_accessed for multiple concepts."""
+        if not ids:
+            return
+        now = time.time()
+        updated_ids = []
+        updated_metas = []
+        for cid, meta in zip(ids, metas):
+            if not cid:
+                continue
+            m = dict(meta)
+            m["access_count"] = m.get("access_count", 0) + 1
+            m["last_accessed"] = now
+            updated_ids.append(cid)
+            updated_metas.append(m)
+        if updated_ids:
+            try:
+                self._concepts.update(ids=updated_ids, metadatas=updated_metas)
+            except Exception:
+                pass
+
     def delete_concept(self, concept_id: str) -> None:
         try:
             self._concepts.delete(ids=[concept_id])
@@ -148,14 +177,21 @@ class VectorStore:
         return aid
 
     def query_associations(self, vector: np.ndarray, n: int = 20) -> list[dict]:
-        count = self._associations.count()
-        if count == 0:
-            return []
-        results = self._associations.query(
-            query_embeddings=[vector.tolist()],
-            n_results=min(n, count),
-            include=["metadatas", "documents", "distances"],
-        )
+        try:
+            results = self._associations.query(
+                query_embeddings=[vector.tolist()],
+                n_results=n,
+                include=["metadatas", "documents", "distances"],
+            )
+        except Exception:
+            count = self._associations.count()
+            if count == 0:
+                return []
+            results = self._associations.query(
+                query_embeddings=[vector.tolist()],
+                n_results=max(count, 1),
+                include=["metadatas", "documents", "distances"],
+            )
         return self._unpack(results)
 
     # -- maintenance --

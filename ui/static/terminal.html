@@ -22,16 +22,30 @@
     <div class="panels">
       <!-- LEFT COLUMN -->
       <div class="panel-column left-col">
-        <!-- CHAT PANEL -->
+        <!-- CHAT PANEL WITH SIDEBAR -->
         <div class="panel chat-panel">
           <div class="panel-header">
             <span class="panel-title">CHAT</span>
+            <button class="action-btn sidebar-toggle" id="btn-toggle-sidebar" title="Toggle sessions">SESSIONS</button>
             <span class="panel-badge" id="badge-llm">LLM: --</span>
           </div>
-          <div class="panel-body" id="chat-output"></div>
-          <div class="chat-input-row">
-            <span class="prompt-prefix">user@lqnn:~$</span>
-            <input type="text" id="chat-input" placeholder="Ask the quantum brain..." autocomplete="off" spellcheck="false" />
+          <div class="chat-container">
+            <!-- SESSION SIDEBAR -->
+            <div class="chat-sidebar" id="chat-sidebar">
+              <div class="sidebar-header">
+                <span class="sidebar-title">SESSIONS</span>
+                <button class="sidebar-btn new-btn" id="btn-new-session" title="New Session">+</button>
+              </div>
+              <div class="session-list" id="session-list"></div>
+            </div>
+            <!-- CHAT CONTENT -->
+            <div class="chat-main">
+              <div class="panel-body" id="chat-output"></div>
+              <div class="chat-input-row">
+                <span class="prompt-prefix">user@lqnn:~$</span>
+                <input type="text" id="chat-input" placeholder="Ask the quantum brain..." autocomplete="off" spellcheck="false" />
+              </div>
+            </div>
           </div>
         </div>
 
@@ -92,6 +106,19 @@
       </div>
     </div>
   </div>
+
+  <!-- DELETE CONFIRMATION MODAL -->
+  <div class="modal-overlay" id="delete-modal">
+    <div class="modal-box">
+      <div class="modal-title">DELETE SESSION?</div>
+      <div class="modal-body" id="delete-modal-body">Are you sure you want to delete this session?</div>
+      <div class="modal-actions">
+        <button class="modal-btn cancel" id="modal-cancel">CANCEL</button>
+        <button class="modal-btn confirm" id="modal-confirm">DELETE</button>
+      </div>
+    </div>
+  </div>
+
   <script src="/static/terminal.js"></script>
 </body>
 </html>

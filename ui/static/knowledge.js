@@ -63,6 +63,8 @@ function handleMessage(data) {
     handleLiveEvent(data);
   } else if (data.type === "kb_ingest_result") {
     handleIngestResult(data);
+  } else if (data.type === "kb_queue_result") {
+    logEntry("sys", `Queued URL for processing: ${data.source}`);
   } else if (data.type === "error") {
     logEntry("error", data.message || "unknown error");
   }
@@ -116,6 +118,9 @@ function handleLiveEvent(ev) {
       markQueueItemDone(ev.source, ev.success, ev.error);
       break;
     }
+    case "kb_queued":
+      logEntry("sys", `queued: ${ev.source}`);
+      break;
   }
 }
 
@@ -273,14 +278,14 @@ async function ingestAll() {
         body: formData,
       });
       const result = await resp.json();
-      item.status = result.success ? "done" : "error";
       stats.files++;
-      stats.chunks += result.chunks_stored || 0;
-      stats.images += result.images_stored || 0;
-      stats.concepts += result.concepts_created || 0;
-      stats.rejected += result.chunks_rejected || 0;
-      if (result.success) stats.ingested++;
+      item.status = result.queued ? "running" : "error";
       updateStats();
+      if (result.queued) {
+        logEntry("sys", `Queued file: ${item.name}`);
+      } else if (result.error) {
+        logEntry("error", `Queue failed: ${item.name} — ${result.error}`);
+      }
     } catch (e) {
       item.status = "error";
       logEntry("error", `Upload failed: ${item.name} — ${e.message}`);
