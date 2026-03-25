@@ -137,8 +137,18 @@ function handleReasoning(step) {
 
     const header = document.createElement("div");
     header.className = "reasoning-header";
-    header.innerHTML = '<span class="reasoning-icon">⚡</span> <span class="reasoning-label">QUANTUM REASONING</span>';
+    header.innerHTML =
+      '<span class="reasoning-icon">⚡</span> ' +
+      '<span class="reasoning-label">QUANTUM REASONING</span>' +
+      '<span class="reasoning-toggle">▶ show</span>';
     reasoningDiv.appendChild(header);
+
+    header.addEventListener("click", () => {
+      if (!reasoningDiv.classList.contains("reasoning-complete")) return;
+      const expanded = reasoningDiv.classList.toggle("reasoning-expanded");
+      const toggle = header.querySelector(".reasoning-toggle");
+      if (toggle) toggle.textContent = expanded ? "▼ hide" : "▶ show";
+    });
 
     const steps = document.createElement("div");
     steps.className = "reasoning-steps";

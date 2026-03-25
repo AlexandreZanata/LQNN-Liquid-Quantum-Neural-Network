@@ -533,14 +533,14 @@ body {
 
 .reasoning-block.reasoning-complete {
   opacity: 0.4;
-  max-height: 40px;
+  max-height: 24px;
   overflow: hidden;
   cursor: pointer;
 }
 
-.reasoning-block.reasoning-complete:hover {
+.reasoning-block.reasoning-complete.reasoning-expanded {
   opacity: 0.7;
-  max-height: none;
+  max-height: 600px;
 }
 
 .reasoning-header {
@@ -550,6 +550,18 @@ body {
   padding: 3px 8px;
   background: rgba(255, 221, 0, 0.06);
   border-bottom: 1px solid rgba(255, 221, 0, 0.1);
+}
+
+.reasoning-toggle {
+  margin-left: auto;
+  font-size: 8px;
+  color: var(--yellow-dim);
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+.reasoning-block.reasoning-complete .reasoning-toggle {
+  opacity: 1;
 }
 
 .reasoning-icon {
