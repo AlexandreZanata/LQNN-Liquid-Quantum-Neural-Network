@@ -39,6 +39,7 @@ REACTIVE_CONFIDENCE_THRESHOLD = 0.08
 
 AGENT_SEARCH_TIMEOUT_S = 12
 AGENT_SEARCH_MAX_CHARS = 3000
+CHAT_STREAM_TIMEOUT_S = 180
 
 _REALTIME_PATTERNS = re.compile(
     r"\b(today|hoje|hoy|agora|now|current|atual|weather|clima|tempo|"
@@ -722,6 +723,20 @@ class ChatEngine:
             self._active_cancel = cancel
         self.llm.set_chat_active(True)
         t0 = time.time()
+
+        def _timeout_watchdog() -> None:
+            deadline = t0 + CHAT_STREAM_TIMEOUT_S
+            while time.time() < deadline:
+                if cancel.is_cancelled:
+                    return
+                time.sleep(2)
+            if not cancel.is_cancelled:
+                log.warning("chat_stream timeout after %ds — auto-cancelling",
+                            CHAT_STREAM_TIMEOUT_S)
+                cancel.cancel()
+
+        threading.Thread(target=_timeout_watchdog, daemon=True).start()
+
         user_text = user_text.strip()
         if not user_text:
             return {"response": "...", "confidence": 0.0, "concepts": [],

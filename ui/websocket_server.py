@@ -68,6 +68,10 @@ class WebSocketStateServer:
 
     def disconnect(self, ws: WebSocket) -> None:
         self._clients.discard(ws)
+        task = self._active_stream_tasks.pop(ws, None)
+        if task and not task.done():
+            self.controller.chat_engine.cancel_active()
+            log.info("Auto-cancelled active stream on WebSocket disconnect")
 
     async def _broadcast_to_all(self, data: dict) -> None:
         dead: list[WebSocket] = []

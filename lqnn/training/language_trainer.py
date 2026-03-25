@@ -295,6 +295,11 @@ class LanguageTrainer:
             if not self._running:
                 break
 
+            while self.memory.llm.chat_active:
+                await asyncio.sleep(0.5)
+                if not self._running:
+                    break
+
             pairs_batch.append(pair)
 
             if len(pairs_batch) >= BATCH_SIZE:
@@ -342,6 +347,9 @@ class LanguageTrainer:
         """
         stored = 0
         loop = asyncio.get_event_loop()
+
+        while self.memory.llm.chat_active:
+            await asyncio.sleep(0.5)
 
         encode_futures = []
         for pair in pairs:
