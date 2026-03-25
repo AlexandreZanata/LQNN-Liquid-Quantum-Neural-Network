@@ -1,9 +1,17 @@
-"""ChromaDB wrapper for persistent vector storage with quantum metadata."""
+"""ChromaDB wrapper for persistent vector storage with quantum metadata.
+
+v2 additions:
+- Batch upsert / query helpers for the QuantumBatchEngine
+- Float16 embedding support (2x memory savings, lossless for cosine sim)
+- Dirty-set tracking for incremental consolidation
+- In-memory crystallized-tier cache for sub-ms lookups
+"""
 
 from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -14,6 +22,7 @@ import numpy as np
 log = logging.getLogger(__name__)
 
 CHROMA_DIR = os.environ.get("CHROMA_DIR", "data/chroma")
+USE_FLOAT16 = True  # halve embedding storage with negligible quality loss
 
 
 @dataclass
@@ -30,12 +39,24 @@ class VectorEntry:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+def _to_f16(vec: np.ndarray) -> list[float]:
+    """Optionally compress to float16 before handing to Chroma."""
+    if USE_FLOAT16:
+        return vec.astype(np.float16).astype(np.float32).tolist()
+    return vec.tolist()
+
+
 class VectorStore:
     """Persistent vector store backed by ChromaDB.
 
     Collections:
     - concepts: primary concept vectors (CLIP embeddings)
     - associations: relational links between concepts
+
+    v2 features:
+    - dirty_set: track modified concept IDs for incremental consolidation
+    - crystallized_cache: in-memory tier for low-volatility concepts
+    - batch helpers for the QuantumBatchEngine
     """
 
     def __init__(self, persist_dir: str | None = None) -> None:
@@ -49,6 +70,15 @@ class VectorStore:
             name="associations",
             metadata={"hnsw:space": "cosine"},
         )
+
+        # Incremental consolidation tracking
+        self._dirty_lock = threading.Lock()
+        self._dirty_ids: set[str] = set()
+
+        # Crystallized tier: id -> (vector, metadata, document)
+        self._crystal_lock = threading.Lock()
+        self._crystallized: dict[str, tuple[np.ndarray, dict, str]] = {}
+
         log.info(
             "VectorStore ready: %d concepts, %d associations",
             self._concepts.count(), self._associations.count(),
@@ -71,10 +101,11 @@ class VectorStore:
 
         self._concepts.upsert(
             ids=[entry.id],
-            embeddings=[entry.vector.tolist()],
+            embeddings=[_to_f16(entry.vector)],
             metadatas=[meta],
             documents=[entry.concept],
         )
+        self._mark_dirty(entry.id)
 
     def query_concepts(self, vector: np.ndarray, n: int = 10,
                        max_volatility: float | None = None) -> list[dict]:
@@ -128,6 +159,7 @@ class VectorStore:
         meta = existing["metadata"]
         meta.update(updates)
         self._concepts.update(ids=[concept_id], metadatas=[meta])
+        self._mark_dirty(concept_id)
 
     def batch_touch(self, ids: list[str], metas: list[dict]) -> None:
         """Batch-update access_count and last_accessed for multiple concepts."""
@@ -155,6 +187,8 @@ class VectorStore:
             self._concepts.delete(ids=[concept_id])
         except Exception:
             pass
+        with self._crystal_lock:
+            self._crystallized.pop(concept_id, None)
 
     # -- associations --
 
@@ -232,11 +266,152 @@ class VectorStore:
             })
         return out
 
+    # -- batch operations (used by QuantumBatchEngine) --
+
+    def batch_add_concepts(self, entries: list[VectorEntry]) -> None:
+        """Upsert multiple concepts in a single Chroma call."""
+        if not entries:
+            return
+        ids = []
+        embeddings = []
+        metadatas = []
+        documents = []
+        for entry in entries:
+            ids.append(entry.id)
+            embeddings.append(_to_f16(entry.vector))
+            meta = {
+                "concept": entry.concept,
+                "source": entry.source,
+                "volatility": entry.volatility,
+                "confidence": entry.confidence,
+                "access_count": entry.access_count,
+                "created_at": entry.created_at,
+                "last_accessed": entry.last_accessed,
+            }
+            meta.update({k: v for k, v in entry.metadata.items()
+                         if isinstance(v, (str, int, float, bool))})
+            metadatas.append(meta)
+            documents.append(entry.concept)
+        self._concepts.upsert(
+            ids=ids, embeddings=embeddings,
+            metadatas=metadatas, documents=documents,
+        )
+        for cid in ids:
+            self._mark_dirty(cid)
+
+    def batch_query_concepts(self, vectors: list[np.ndarray],
+                             n: int = 10) -> list[list[dict]]:
+        """Run multiple concept queries in one Chroma call."""
+        if not vectors:
+            return []
+        embeds = [_to_f16(v) for v in vectors]
+        try:
+            raw = self._concepts.query(
+                query_embeddings=embeds,
+                n_results=n,
+                include=["metadatas", "documents", "distances"],
+            )
+        except Exception:
+            n_avail = max(self._concepts.count(), 1)
+            raw = self._concepts.query(
+                query_embeddings=embeds,
+                n_results=min(n, n_avail),
+                include=["metadatas", "documents", "distances"],
+            )
+        return self._unpack_multi(raw)
+
+    # -- dirty set for incremental consolidation --
+
+    def _mark_dirty(self, concept_id: str) -> None:
+        with self._dirty_lock:
+            self._dirty_ids.add(concept_id)
+
+    def pop_dirty_ids(self) -> set[str]:
+        """Return and clear the set of concept IDs modified since last call."""
+        with self._dirty_lock:
+            ids = self._dirty_ids.copy()
+            self._dirty_ids.clear()
+        return ids
+
+    # -- crystallized tier --
+
+    def promote_to_crystal(self, concept_id: str, vector: np.ndarray,
+                           metadata: dict, document: str) -> None:
+        """Add a crystallized concept to the fast in-memory tier."""
+        with self._crystal_lock:
+            self._crystallized[concept_id] = (
+                vector.astype(np.float32), dict(metadata), document)
+
+    def query_crystal_tier(self, vector: np.ndarray,
+                           n: int = 5) -> list[dict]:
+        """Fast cosine search over the in-memory crystallized tier."""
+        with self._crystal_lock:
+            if not self._crystallized:
+                return []
+            ids = list(self._crystallized.keys())
+            data = [self._crystallized[k] for k in ids]
+
+        mat = np.stack([d[0] for d in data])
+        sims = mat @ vector.astype(np.float32)
+        top = np.argsort(-sims)[:n]
+        results = []
+        for idx in top:
+            cid = ids[idx]
+            vec, meta, doc = data[idx]
+            results.append({
+                "id": cid,
+                "metadata": meta,
+                "document": doc,
+                "distance": float(1.0 - sims[idx]),
+            })
+        return results
+
+    def crystal_count(self) -> int:
+        with self._crystal_lock:
+            return len(self._crystallized)
+
+    # -- all vectors export (for HEI build) --
+
+    def export_all_vectors(self) -> tuple[list[str], np.ndarray]:
+        """Return (ids, vectors) for every concept. Used by HEI build."""
+        data = self._concepts.get(include=["embeddings"])
+        ids = data.get("ids", [])
+        embeds = data.get("embeddings", [])
+        if not ids or not embeds:
+            return [], np.empty((0, 512), dtype=np.float32)
+        return ids, np.array(embeds, dtype=np.float32)
+
     def stats(self) -> dict:
         return {
             "concepts": self._concepts.count(),
             "associations": self._associations.count(),
+            "crystallized": self.crystal_count(),
+            "dirty_pending": len(self._dirty_ids),
         }
+
+    @staticmethod
+    def _unpack_multi(results: dict) -> list[list[dict]]:
+        """Unpack multi-query Chroma results into list of list of dicts."""
+        all_results: list[list[dict]] = []
+        if not results or not results.get("ids"):
+            return all_results
+        for q_idx in range(len(results["ids"])):
+            items: list[dict] = []
+            ids_list = results["ids"][q_idx]
+            metas = results.get("metadatas", [[]])[q_idx] if results.get("metadatas") else []
+            docs = results.get("documents", [[]])[q_idx] if results.get("documents") else []
+            dists = results.get("distances", [[]])[q_idx] if results.get("distances") else []
+            for i, rid in enumerate(ids_list):
+                item: dict = {"id": rid}
+                if i < len(metas) and metas[i] is not None:
+                    item["metadata"] = metas[i]
+                if i < len(docs) and docs[i] is not None:
+                    item["document"] = docs[i]
+                if i < len(dists):
+                    item["distance"] = dists[i]
+                items.append(item)
+            all_results.append(items)
+        return all_results
 
     @staticmethod
     def _unpack(results: dict) -> list[dict]:

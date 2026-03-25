@@ -4,8 +4,9 @@ Starts:
 1. The AI models (CLIP + Qwen2.5-7B)
 2. ChromaDB vector store
 3. MongoDB logging
-4. Continuous training loop (background)
-5. FastAPI web UI with hacker terminal (foreground)
+4. Quantum processing subsystems (HEI, batch engine, temporal pipeline)
+5. Continuous training loop (background)
+6. FastAPI web UI with hacker terminal (foreground)
 """
 
 from __future__ import annotations
@@ -65,6 +66,9 @@ def build_system():
 
     from lqnn.core.vector_store import VectorStore
     from lqnn.core.associative_memory import AssociativeMemory
+    from lqnn.core.entanglement_index import EntanglementIndex
+    from lqnn.core.quantum_batch_engine import QuantumBatchEngine
+    from lqnn.core.temporal_pipeline import TemporalPipeline
     from lqnn.models.clip_encoder import CLIPEncoder
     from lqnn.models.llm_engine import LLMEngine
     from lqnn.agents.browser_agent import BrowserAgent
@@ -87,6 +91,14 @@ def build_system():
 
     log.info("Initializing associative memory...")
     memory = AssociativeMemory(store=store, clip=clip, llm=llm)
+
+    log.info("Initializing Hierarchical Entanglement Index...")
+    hei = EntanglementIndex()
+    memory.set_hei(hei)
+
+    log.info("Initializing Quantum Batch Engine...")
+    batch_engine = QuantumBatchEngine(clip=clip, store=store)
+    memory.set_batch_engine(batch_engine)
 
     log.info("Connecting to MongoDB...")
     training_db = TrainingDB()
@@ -123,6 +135,16 @@ def build_system():
     trainer.set_event_callback(ws_server.push_event)
     agent_manager.set_event_callback(ws_server.push_event)
 
+    log.info("Initializing Temporal Pipeline...")
+    pipeline = TemporalPipeline(
+        memory=memory,
+        batch_engine=batch_engine,
+        hei=hei,
+        event_callback=ws_server.push_event,
+    )
+    trainer.set_temporal_pipeline(pipeline)
+    trainer.set_hei(hei)
+
     log.info("Setting up language trainer...")
     from lqnn.training.language_trainer import LanguageTrainer
     from ui.websocket_server import set_language_trainer
@@ -137,6 +159,8 @@ def build_system():
         memory=memory,
         event_callback=ws_server.push_event,
     )
+    ingestion.set_batch_engine(batch_engine)
+    ingestion.set_hei(hei)
     controller.set_ingestion_pipeline(ingestion)
     rabbitmq_url = os.environ.get("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/")
     controller.ingestion_queue = RabbitIngestionQueue(
@@ -147,7 +171,7 @@ def build_system():
 
     app = create_app(controller=controller, ws_server=ws_server, trainer=trainer)
 
-    log.info("System initialized. Starting server...")
+    log.info("System initialized with quantum processing revolution. Starting server...")
     return app
 
 

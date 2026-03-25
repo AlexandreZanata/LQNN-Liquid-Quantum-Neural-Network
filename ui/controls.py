@@ -112,8 +112,15 @@ def _read_gpu_metrics() -> dict[str, Any]:
         return dict(_GPU_METRICS_LAST)
 
 
+# Hardware budget limits (RTX 4060 8GB / 32GB RAM)
+VRAM_BUDGET_GB = 8.0
+VRAM_WARNING_THRESHOLD = 0.90   # warn at 90%
+RAM_BUDGET_GB = 32.0
+RAM_WARNING_THRESHOLD = 0.85    # warn at 85%
+
+
 def _get_system_metrics(model_runtime_state: str = "unknown") -> dict[str, Any]:
-    """Collect CPU, GPU, and memory metrics."""
+    """Collect CPU, GPU, and memory metrics with hardware budget checks."""
     metrics: dict[str, Any] = {}
     try:
         import psutil
@@ -130,6 +137,27 @@ def _get_system_metrics(model_runtime_state: str = "unknown") -> dict[str, Any]:
     metrics.update(gpu)
     metrics["model_runtime_state"] = model_runtime_state
     metrics["cuda_available"] = gpu.get("gpu_metric_source") not in {"none", "no_cuda"}
+
+    # Hardware budget monitoring
+    vram_used = metrics.get("gpu_used_gb", 0)
+    vram_total = metrics.get("gpu_total_gb", 0) or VRAM_BUDGET_GB
+    ram_used = metrics.get("ram_used_gb", 0)
+    ram_total = metrics.get("ram_total_gb", 0) or RAM_BUDGET_GB
+
+    metrics["vram_utilization"] = round(vram_used / vram_total, 3) if vram_total else 0
+    metrics["ram_utilization"] = round(ram_used / ram_total, 3) if ram_total else 0
+    metrics["vram_headroom_gb"] = round(vram_total - vram_used, 2)
+    metrics["ram_headroom_gb"] = round(ram_total - ram_used, 2)
+
+    budget_warnings = []
+    if vram_used / max(vram_total, 0.1) > VRAM_WARNING_THRESHOLD:
+        budget_warnings.append(
+            f"VRAM {vram_used:.1f}/{vram_total:.1f}GB ({vram_used/vram_total*100:.0f}%)")
+    if ram_used / max(ram_total, 0.1) > RAM_WARNING_THRESHOLD:
+        budget_warnings.append(
+            f"RAM {ram_used:.1f}/{ram_total:.1f}GB ({ram_used/ram_total*100:.0f}%)")
+    metrics["hardware_budget_warnings"] = budget_warnings
+    metrics["hardware_budget_ok"] = len(budget_warnings) == 0
 
     return metrics
 

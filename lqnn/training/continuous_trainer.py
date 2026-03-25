@@ -5,6 +5,10 @@ Phase 1 (cycles 1-100): Visual Objects -- learn concrete objects with images
 Phase 2 (cycles 100+): Abstract Concepts -- expand to science, history, etc.
 Phase Continuous: Self-evolution -- IA decides what to learn next
 
+v2: Integrates with TemporalPipeline for overlapping stage execution.
+Consolidation and resonance are delegated to the pipeline when available,
+while the trainer still owns phased web crawling and self-play.
+
 Each cycle:
 1. Detect knowledge gaps (phase-aware)
 2. Crawl the web for images + text
@@ -231,7 +235,17 @@ class ContinuousTrainer:
         self._task: asyncio.Task | None = None
         self._event_callback = None
         self._training_log: list[dict] = []
+        self._temporal_pipeline = None
+        self._hei = None
         self._load_state()
+
+    def set_temporal_pipeline(self, pipeline) -> None:
+        """Inject the TemporalPipeline for overlapping stage execution."""
+        self._temporal_pipeline = pipeline
+
+    def set_hei(self, hei) -> None:
+        """Inject HEI for periodic rebuilds."""
+        self._hei = hei
 
     def set_event_callback(self, callback) -> None:
         """Set a callback for broadcasting training events to the UI."""
@@ -309,12 +323,22 @@ class ContinuousTrainer:
             return
         self._running = True
         self._start_time = time.time()
+
+        if self._temporal_pipeline:
+            await self._temporal_pipeline.start()
+            self._emit("trainer_start", {
+                "message": "Continuous training started (temporal pipeline active)",
+            })
+        else:
+            self._emit("trainer_start", {"message": "Continuous training started"})
+
         self._task = asyncio.create_task(self._loop())
-        self._emit("trainer_start", {"message": "Continuous training started"})
         log.info("Continuous trainer started")
 
     async def stop(self) -> None:
         self._running = False
+        if self._temporal_pipeline:
+            await self._temporal_pipeline.stop()
         if self._task:
             self._task.cancel()
             try:
@@ -424,13 +448,34 @@ class ContinuousTrainer:
         })
 
         consolidation = {"pruned": 0, "crystallized": 0}
+        use_pipeline_consolidation = (
+            self._temporal_pipeline is not None
+        )
         if self._cycle % self.CONSOLIDATION_INTERVAL_CYCLES == 0:
-            consolidation = await asyncio.to_thread(self.memory.consolidate)
-            self._emit("consolidation", {
-                "pruned": consolidation.get("pruned", 0),
-                "crystallized": consolidation.get("crystallized", 0),
-                "decayed": consolidation.get("decayed", 0),
-            })
+            if not use_pipeline_consolidation:
+                consolidation = await asyncio.to_thread(self.memory.consolidate)
+                self._emit("consolidation", {
+                    "pruned": consolidation.get("pruned", 0),
+                    "crystallized": consolidation.get("crystallized", 0),
+                    "decayed": consolidation.get("decayed", 0),
+                })
+            else:
+                self._emit("consolidation", {
+                    "message": "Delegated to temporal pipeline (incremental)",
+                })
+
+        if self._hei and self._cycle % 50 == 0:
+            try:
+                ids, vecs = await asyncio.to_thread(
+                    self.memory.store.export_all_vectors)
+                if len(ids) > 50:
+                    await asyncio.to_thread(self._hei.build, ids, vecs)
+                    self._emit("hei_rebuild", {
+                        "concepts": len(ids),
+                        "stats": self._hei.stats(),
+                    })
+            except Exception as exc:
+                log.debug("HEI rebuild error: %s", exc)
 
         self_play_result = {"action": "skip"}
         if self._cycle % self.SELF_PLAY_INTERVAL_CYCLES == 0:
@@ -581,7 +626,7 @@ class ContinuousTrainer:
         return summary
 
     def status(self) -> dict:
-        return {
+        result = {
             "running": self._running,
             "cycle": self._cycle,
             "phase": self.current_phase().value,
@@ -590,3 +635,8 @@ class ContinuousTrainer:
             "memory": self.memory.stats(),
             "agents": self.agent_manager.stats(),
         }
+        if self._temporal_pipeline:
+            result["pipeline"] = self._temporal_pipeline.stats()
+        if self._hei:
+            result["hei"] = self._hei.stats()
+        return result

@@ -61,7 +61,10 @@ HISTORY_FILE = "data/ingestion_history.json"
 
 
 class KnowledgeIngestionPipeline:
-    """Processes user-curated training data into the quantum memory."""
+    """Processes user-curated training data into the quantum memory.
+
+    v2: accepts QuantumBatchEngine and HEI for batched encoding/writes.
+    """
 
     def __init__(
         self,
@@ -72,6 +75,14 @@ class KnowledgeIngestionPipeline:
         self._emit = event_callback or (lambda e: None)
         self._history: list[dict] = self._load_history()
         self._ingested_hashes: set[str] = self._build_hash_index()
+        self._batch_engine = None
+        self._hei = None
+
+    def set_batch_engine(self, engine) -> None:
+        self._batch_engine = engine
+
+    def set_hei(self, hei) -> None:
+        self._hei = hei
 
     def _load_history(self) -> list[dict]:
         import json
@@ -317,31 +328,38 @@ class KnowledgeIngestionPipeline:
             source_type=source_type,
             source_name=source_name,
             metadata=meta,
+            adaptive=True,
         )
         result.chunks_total = len(chunks)
-        log.info("Split %s into %d chunks", source_name, len(chunks))
+        log.info("Split %s into %d chunks (adaptive sizing)", source_name,
+                 len(chunks))
         self._emit_progress(source_type, source_name, "chunking", 5,
                             extra={"total_chunks": len(chunks)})
 
-        batch_size = 10
-        for i, chunk in enumerate(chunks):
-            ok = await asyncio.to_thread(self._store_chunk, chunk)
-            if ok:
-                result.chunks_stored += 1
-                result.concepts_created += 1
-            else:
-                result.chunks_rejected += 1
+        batch_size = 32
+        for batch_start in range(0, len(chunks), batch_size):
+            batch_end = min(batch_start + batch_size, len(chunks))
+            batch = chunks[batch_start:batch_end]
 
-            if (i + 1) % batch_size == 0 or i == len(chunks) - 1:
-                pct = int(((i + 1) / max(len(chunks), 1)) * 90) + 5
-                self._emit_progress(source_type, source_name, "encoding", pct,
-                                    extra={"stored": result.chunks_stored,
-                                           "rejected": result.chunks_rejected,
-                                           "processed": i + 1,
-                                           "total": len(chunks)})
-                log.info("  [%s] %d/%d chunks (stored=%d rejected=%d)",
-                         source_name[:30], i + 1, len(chunks),
-                         result.chunks_stored, result.chunks_rejected)
+            results_ok = await asyncio.to_thread(
+                self._store_chunk_batch, batch)
+
+            for ok in results_ok:
+                if ok:
+                    result.chunks_stored += 1
+                    result.concepts_created += 1
+                else:
+                    result.chunks_rejected += 1
+
+            pct = int((batch_end / max(len(chunks), 1)) * 90) + 5
+            self._emit_progress(source_type, source_name, "encoding", pct,
+                                extra={"stored": result.chunks_stored,
+                                       "rejected": result.chunks_rejected,
+                                       "processed": batch_end,
+                                       "total": len(chunks)})
+            log.info("  [%s] %d/%d chunks (stored=%d rejected=%d)",
+                     source_name[:30], batch_end, len(chunks),
+                     result.chunks_stored, result.chunks_rejected)
             await asyncio.sleep(0)
 
         return result
@@ -368,6 +386,103 @@ class KnowledgeIngestionPipeline:
                 continue
             cleaned_lines.append(line)
         return "\n".join(cleaned_lines)
+
+    def _store_chunk_batch(self, chunks: list[TextChunk]) -> list[bool]:
+        """Batch-encode and store multiple chunks at once.
+
+        Uses batched CLIP encoding (one GPU call for all chunks) and
+        batched Chroma writes for dramatically higher throughput.
+        """
+        valid_chunks = []
+        valid_texts = []
+        results = [False] * len(chunks)
+
+        for i, chunk in enumerate(chunks):
+            text = chunk.text.strip()
+            if len(text) < MIN_CHUNK_CHARS:
+                continue
+            if len(text) > MAX_CHUNK_CHARS:
+                text = text[:MAX_CHUNK_CHARS]
+            printable = sum(c.isprintable() for c in text) / max(len(text), 1)
+            if printable < 0.50:
+                continue
+            valid_chunks.append((i, chunk, text))
+            valid_texts.append(text[:512])
+
+        if not valid_texts:
+            return results
+
+        try:
+            vectors = self.memory.clip.encode_texts(valid_texts)
+        except Exception as e:
+            log.warning("Batch CLIP encode failed: %s", e)
+            return results
+
+        entries_to_write = []
+        entry_indices = []
+        for vi, (orig_idx, chunk, text) in enumerate(valid_chunks):
+            vector = vectors[vi]
+
+            try:
+                existing = self.memory.store.query_concepts(vector, n=1)
+                if existing and existing[0].get("distance", 1.0) < 0.08:
+                    continue
+            except Exception:
+                pass
+
+            concept_label = self._extract_concept_label(text)
+            chunk_id = "kb_" + hashlib.md5(text.encode()).hexdigest()[:16]
+
+            entry = VectorEntry(
+                id=chunk_id,
+                vector=vector,
+                concept=concept_label,
+                source=chunk.source_name,
+                volatility=0.3,
+                confidence=0.7,
+                metadata={
+                    "full_text": text[:2000],
+                    "source_type": chunk.source_type,
+                    "curation": "user_curated",
+                    **{k: str(v) for k, v in chunk.metadata.items()},
+                },
+            )
+            entries_to_write.append(entry)
+            entry_indices.append(orig_idx)
+
+            if self._hei:
+                self._hei.assign(chunk_id, vector)
+
+        if entries_to_write:
+            try:
+                self.memory.store.batch_add_concepts(entries_to_write)
+                for idx in entry_indices:
+                    results[idx] = True
+
+                for entry in entries_to_write:
+                    import queue as _q
+                    try:
+                        self.memory._assoc_bg_queue.put_nowait(
+                            (entry.concept, entry.vector, 5))
+                    except _q.Full:
+                        pass
+
+                    self._emit({
+                        "type": "kb_chunk_stored",
+                        "source": entry.source,
+                        "concept": entry.concept[:50],
+                        "timestamp": time.time(),
+                    })
+            except Exception as e:
+                log.warning("Batch Chroma write failed, falling back: %s", e)
+                for entry, idx in zip(entries_to_write, entry_indices):
+                    try:
+                        self.memory.store.add_concept(entry)
+                        results[idx] = True
+                    except Exception:
+                        pass
+
+        return results
 
     def _store_chunk(self, chunk: TextChunk) -> bool:
         """Encode a text chunk and store it in the quantum memory.

@@ -5,12 +5,17 @@ sections, sentences) and treat each chunk as a quantum state candidate.
 The CLIP encoder then collapses each chunk into a 512-d vector that
 coexists in superposition inside ChromaDB.
 
+v2: Adaptive chunk sizing via phase-space information density analysis.
+High-entropy (information-dense) text gets smaller chunks for finer
+vector resolution; low-entropy (repetitive) text gets larger chunks.
+
 Strategy:
 - Section-aware: respects [Page N] markers and heading-like lines
 - Paragraph-level: splits on double newlines
 - Sentence fallback: for long paragraphs
 - Overlap: 10% overlap for context entanglement between adjacent chunks
 - Minimum quality: rejects chunks that are too short or mostly noise
+- Adaptive sizing: chunk target adapts to information density
 """
 
 from __future__ import annotations
@@ -37,17 +42,27 @@ def semantic_chunk(
     text: str,
     source_type: str,
     source_name: str,
-    max_chars: int = 1800,
+    max_chars: int = 0,
     overlap_chars: int = 200,
     metadata: dict | None = None,
+    adaptive: bool = True,
 ) -> list[TextChunk]:
     """Split text into semantic chunks respecting paragraph and section
     boundaries.
+
+    When *adaptive* is True (default), max_chars is computed dynamically
+    based on the text's information density.
     """
     meta = metadata or {}
     text = text.strip()
     if not text:
         return []
+
+    if adaptive and max_chars <= 0:
+        from lqnn.core.phase_space import adaptive_chunk_size
+        max_chars = adaptive_chunk_size(text)
+    elif max_chars <= 0:
+        max_chars = 1800
 
     paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
 

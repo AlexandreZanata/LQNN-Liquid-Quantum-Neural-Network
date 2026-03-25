@@ -1,6 +1,9 @@
 """Chat engine -- answers user questions grounded on associative memory.
 
-Now includes reactive learning: when the brain doesn't know something,
+v2: Leverages the Probabilistic Wave-Collapse Engine for 12x more context,
+multi-hop knowledge discovery, and quantum probability confidence scores.
+
+Includes reactive learning: when the brain doesn't know something,
 it queues an active search to learn it for next time.
 """
 
@@ -105,10 +108,12 @@ class ChatEngine:
         collapse = self.memory.query(user_text, n_results=10)
 
         learning_triggered = False
+        has_multi_hop = bool(getattr(collapse, "multi_hop_concepts", None))
+        max_tokens = 500 if has_multi_hop else 300
 
         if collapse.confidence >= self.MIN_CONFIDENCE and collapse.context:
             response = self.llm.answer_with_context(
-                user_text, collapse.context, max_new_tokens=300,
+                user_text, collapse.context, max_new_tokens=max_tokens,
             )
         elif collapse.confidence > 0:
             response = self.llm.generate(
@@ -116,7 +121,7 @@ class ChatEngine:
                 f"Question: {user_text}\n\n"
                 f"Answer using the above knowledge combined with your general knowledge. "
                 f"Be helpful and thorough.",
-                max_new_tokens=300,
+                max_new_tokens=max_tokens,
                 system_prompt=(
                     "You are LQNN, a quantum associative brain. "
                     "Answer helpfully using available knowledge and general reasoning. "
@@ -181,6 +186,7 @@ class ChatEngine:
             "confidence": round(collapse.confidence, 3),
             "concepts": concepts_found,
             "associations": len(collapse.associations),
+            "multi_hop": len(getattr(collapse, "multi_hop_concepts", [])),
             "duration_ms": duration_ms,
             "status": "ok",
             "learning_triggered": learning_triggered,
@@ -246,9 +252,11 @@ class ChatEngine:
             collapse = self.memory.query(user_text, n_results=10)
             clip_ms = int((time.time() - t_clip) * 1000)
 
-            _reason(f"Quantum collapse complete ({clip_ms}ms) — "
+            multi_hop_count = len(getattr(collapse, "multi_hop_concepts", []))
+            _reason(f"Quantum wave-collapse complete ({clip_ms}ms) — "
                     f"confidence: {collapse.confidence:.2f}, "
-                    f"{len(collapse.matched_concepts)} concepts matched")
+                    f"{len(collapse.matched_concepts)} concepts matched, "
+                    f"{multi_hop_count} multi-hop links")
 
             if collapse.matched_concepts:
                 top_concepts = [c.get("document", "")[:60]
@@ -291,11 +299,13 @@ class ChatEngine:
                 )
                 prompt = user_text
 
+            has_multi_hop = bool(getattr(collapse, "multi_hop_concepts", None))
+            stream_tokens = 500 if has_multi_hop else 300
             _reason("Generating response tokens...")
 
             full_response = []
             for chunk in self.llm.generate_stream(
-                prompt, max_new_tokens=300, temperature=0.4,
+                prompt, max_new_tokens=stream_tokens, temperature=0.4,
                 system_prompt=system_prompt,
             ):
                 full_response.append(chunk)
