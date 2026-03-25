@@ -302,7 +302,7 @@ class LanguageTrainer:
                 processed += stored
                 pairs_batch = []
 
-                if processed % 100 == 0:
+                if processed > 0 and processed % 100 == 0:
                     self._emit("lang_progress", {
                         "lang_code": lang_code,
                         "dataset": dataset_id,

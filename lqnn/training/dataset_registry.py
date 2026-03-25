@@ -59,10 +59,14 @@ _LANG_MAP = {
 
 
 class TatoebaDataset(DatasetInfo):
-    """Tatoeba exports: bz2-compressed TSV link files per language pair.
+    """Tatoeba exports: sentence files + link files joined at parse time.
 
-    Actual URL pattern (verified Mar 2026):
-      https://downloads.tatoeba.org/exports/per_language/eng/eng-jpn_links.tsv.bz2
+    We download three files per language pair:
+      1. eng_sentences_detailed.tsv.bz2  (English sentences)
+      2. {tgt3}_sentences_detailed.tsv.bz2  (Target language sentences)
+      3. eng-{tgt3}_links.tsv.bz2  (Translation links between sentence IDs)
+
+    The parser joins them to produce actual bilingual pairs.
     """
 
     def __init__(self) -> None:
@@ -83,6 +87,17 @@ class TatoebaDataset(DatasetInfo):
         if not src3 or not tgt3:
             return None
         return f"{self.base_url}/{src3}/{src3}-{tgt3}_links.tsv.bz2"
+
+    def extra_urls(self, src: str, tgt: str) -> list[str]:
+        """Additional files needed: sentence exports for both languages."""
+        src3 = _LANG_MAP.get(src)
+        tgt3 = _LANG_MAP.get(tgt)
+        if not src3 or not tgt3:
+            return []
+        return [
+            f"{self.base_url}/{src3}/{src3}_sentences_detailed.tsv.bz2",
+            f"{self.base_url}/{tgt3}/{tgt3}_sentences_detailed.tsv.bz2",
+        ]
 
 
 class Opus100Dataset(DatasetInfo):
@@ -286,16 +301,56 @@ class DatasetRegistry:
 
         self._extract_if_needed(dest_file, dest_dir)
 
+        extra_urls = getattr(ds, "extra_urls", None)
+        if extra_urls:
+            for extra_url in extra_urls("en", lang_code):
+                extra_name = extra_url.rsplit("/", 1)[-1]
+                extra_file = dest_dir / extra_name
+                if extra_file.exists() and extra_file.stat().st_size > 100:
+                    self._extract_if_needed(extra_file, dest_dir)
+                    continue
+                log.info("Downloading extra file %s", extra_url)
+                try:
+                    ssl_ctx = ssl.create_default_context()
+                    timeout = aiohttp.ClientTimeout(total=3600, connect=60)
+                    conn = aiohttp.TCPConnector(ssl=ssl_ctx)
+                    headers = {"User-Agent": "LQNN-LanguageDownloader/1.0"}
+                    async with aiohttp.ClientSession(
+                        timeout=timeout, connector=conn, headers=headers,
+                    ) as session:
+                        async with session.get(extra_url, allow_redirects=True) as resp:
+                            if resp.status != 200:
+                                log.warning("HTTP %d for extra file %s", resp.status, extra_url)
+                                continue
+                            with open(extra_file, "wb") as f:
+                                async for chunk in resp.content.iter_chunked(1024 * 256):
+                                    f.write(chunk)
+                    self._extract_if_needed(extra_file, dest_dir)
+                except Exception as exc:
+                    log.warning("Failed to download extra %s: %s", extra_url, exc)
+
         return dest_dir
 
     @staticmethod
     def _extract_if_needed(filepath: Path, dest_dir: Path) -> None:
         """Extract .tar.gz, .gz, or .bz2 archives."""
+        import stat
+
+        def _fix_permissions(directory: Path) -> None:
+            """Make all extracted files readable by the current user."""
+            for f in directory.rglob("*"):
+                try:
+                    current = f.stat().st_mode
+                    f.chmod(current | stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+                except Exception:
+                    pass
+
         name = filepath.name
         if name.endswith(".tar.gz") or name.endswith(".tgz"):
             try:
                 with tarfile.open(filepath, "r:gz") as tf:
                     tf.extractall(path=dest_dir, filter="data")
+                _fix_permissions(dest_dir)
                 log.info("Extracted tar.gz to %s", dest_dir)
             except Exception as exc:
                 log.warning("Failed to extract %s: %s", filepath, exc)
@@ -336,6 +391,7 @@ class DatasetRegistry:
             try:
                 with tarfile.open(filepath, "r:bz2") as tf:
                     tf.extractall(path=dest_dir, filter="data")
+                _fix_permissions(dest_dir)
                 log.info("Extracted tar.bz2 to %s", dest_dir)
             except Exception as exc:
                 log.warning("Failed to extract %s: %s", filepath, exc)
@@ -354,6 +410,32 @@ class DatasetRegistry:
         if not dest_dir.exists():
             log.warning("No data at %s", dest_dir)
             return
+
+        if dataset_id == "tatoeba":
+            count = 0
+            for pair in self._parse_tatoeba_joined(dest_dir, lang_code, max_pairs):
+                yield pair
+                count += 1
+            if count > 0:
+                return
+
+        aligned = self._find_aligned_pairs(dest_dir, lang_code)
+        if aligned:
+            count = 0
+            for en_file, tgt_file in aligned:
+                if count >= max_pairs:
+                    break
+                try:
+                    for pair in self._parse_aligned_files(
+                        en_file, tgt_file, lang_code, dataset_id,
+                        max_pairs - count,
+                    ):
+                        yield pair
+                        count += 1
+                except Exception as exc:
+                    log.warning("Error parsing aligned %s: %s", en_file, exc)
+            if count > 0:
+                return
 
         _SKIP_EXTS = {".gz", ".bz2", ".tgz"}
         count = 0
@@ -390,6 +472,131 @@ class DatasetRegistry:
                 continue
 
     @staticmethod
+    def _parse_tatoeba_joined(
+        dest_dir: Path,
+        lang_code: str,
+        limit: int,
+    ) -> Iterator[SentencePair]:
+        """Join Tatoeba sentence files via links to produce bilingual pairs.
+
+        Expects three (decompressed) files in dest_dir:
+          - *_sentences_detailed.tsv for English (eng)
+          - *_sentences_detailed.tsv for target language
+          - *_links.tsv with (eng_id, tgt_id) pairs
+        """
+        tgt3 = _LANG_MAP.get(lang_code, lang_code)
+
+        en_sentences: dict[str, str] = {}
+        tgt_sentences: dict[str, str] = {}
+        links_file = None
+
+        for fpath in sorted(dest_dir.rglob("*")):
+            if fpath.suffix.lower() in {".bz2", ".gz"}:
+                continue
+            name = fpath.name.lower()
+            if "eng_sentences" in name and fpath.suffix == ".tsv":
+                log.debug("Loading English sentences from %s", fpath.name)
+                with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                    for line in f:
+                        parts = line.strip().split("\t")
+                        if len(parts) >= 3:
+                            en_sentences[parts[0]] = parts[2]
+            elif f"{tgt3}_sentences" in name and fpath.suffix == ".tsv":
+                log.debug("Loading %s sentences from %s", tgt3, fpath.name)
+                with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                    for line in f:
+                        parts = line.strip().split("\t")
+                        if len(parts) >= 3:
+                            tgt_sentences[parts[0]] = parts[2]
+            elif "_links" in name and fpath.suffix == ".tsv":
+                links_file = fpath
+
+        if not en_sentences or not tgt_sentences or not links_file:
+            return
+
+        log.info("Tatoeba join: %d eng, %d %s sentences, links=%s",
+                 len(en_sentences), len(tgt_sentences), tgt3, links_file.name)
+
+        count = 0
+        with open(links_file, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if count >= limit > 0:
+                    break
+                parts = line.strip().split("\t")
+                if len(parts) < 2:
+                    continue
+                en_id, tgt_id = parts[0], parts[1]
+                en_text = en_sentences.get(en_id, "")
+                tgt_text = tgt_sentences.get(tgt_id, "")
+                if len(en_text) < 3 or len(tgt_text) < 2:
+                    continue
+                count += 1
+                yield SentencePair(
+                    source_lang="en",
+                    target_lang=lang_code,
+                    source_text=en_text,
+                    target_text=tgt_text,
+                    dataset="tatoeba",
+                )
+
+    @staticmethod
+    def _find_aligned_pairs(
+        dest_dir: Path,
+        lang_code: str,
+    ) -> list[tuple[Path, Path]]:
+        """Find matching source (.en) and target (.{lang}) file pairs.
+
+        Used by OPUS-100 which stores source and target in separate files.
+        """
+        lang3 = _LANG_MAP.get(lang_code, lang_code)
+        pairs: list[tuple[Path, Path]] = []
+
+        for en_file in sorted(dest_dir.rglob("*.en")):
+            stem = en_file.name.rsplit(".en", 1)[0]
+            tgt_file = en_file.parent / f"{stem}.{lang_code}"
+            if not tgt_file.exists():
+                tgt_file = en_file.parent / f"{stem}.{lang3}"
+            if tgt_file.exists():
+                pairs.append((en_file, tgt_file))
+                log.debug("Found aligned pair: %s / %s", en_file.name, tgt_file.name)
+        return pairs
+
+    @staticmethod
+    def _parse_aligned_files(
+        en_file: Path,
+        tgt_file: Path,
+        lang_code: str,
+        dataset_id: str,
+        limit: int,
+    ) -> Iterator[SentencePair]:
+        """Parse parallel line-aligned files (one sentence per line)."""
+        count = 0
+        try:
+            with (
+                open(en_file, "r", encoding="utf-8", errors="replace") as f_en,
+                open(tgt_file, "r", encoding="utf-8", errors="replace") as f_tgt,
+            ):
+                for en_line, tgt_line in zip(f_en, f_tgt):
+                    if count >= limit > 0:
+                        break
+                    src_text = en_line.strip()
+                    tgt_text = tgt_line.strip()
+                    if len(src_text) < 3 or len(tgt_text) < 2:
+                        continue
+                    count += 1
+                    yield SentencePair(
+                        source_lang="en",
+                        target_lang=lang_code,
+                        source_text=src_text,
+                        target_text=tgt_text,
+                        dataset=dataset_id,
+                    )
+        except PermissionError:
+            log.warning("Permission denied reading %s / %s -- "
+                        "try: sudo chmod -R a+r data/languages/raw/",
+                        en_file.name, tgt_file.name)
+
+    @staticmethod
     def _parse_tsv(
         filepath: Path,
         lang_code: str,
@@ -398,17 +605,27 @@ class DatasetRegistry:
     ) -> Iterator[SentencePair]:
         """Parse TSV sentence pairs.
 
-        Supports:
-        - Tatoeba links: src_id \\t src_text \\t tgt_id \\t tgt_text
-        - Simple pairs:  src_text \\t tgt_text
+        Auto-detects format:
+        - JParaCrawl (5+ cols): id, english, target_lang, flag1, flag2
+        - Tatoeba sentences (4 cols): src_id, src_text, tgt_id, tgt_text
+        - Simple pairs (2 cols): src_text, tgt_text
         """
         count = 0
+        header_skipped = False
         with open(filepath, "r", encoding="utf-8", errors="replace") as f:
             reader = csv.reader(f, delimiter="\t")
             for row in reader:
                 if count >= limit > 0:
                     break
-                if len(row) >= 4:
+
+                if not header_skipped and row and not row[0][0:1].isdigit():
+                    header_skipped = True
+                    continue
+
+                if len(row) >= 5:
+                    src_text = row[1].strip()
+                    tgt_text = row[2].strip()
+                elif len(row) >= 4:
                     src_text = row[1].strip()
                     tgt_text = row[3].strip()
                 elif len(row) >= 2:
