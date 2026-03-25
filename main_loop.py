@@ -108,7 +108,8 @@ def build_system():
     agent_manager = AgentManager(memory=memory, browser=browser)
 
     log.info("Setting up chat engine...")
-    chat_engine = ChatEngine(memory=memory, llm=llm, training_db=training_db)
+    chat_engine = ChatEngine(memory=memory, llm=llm, training_db=training_db,
+                             agent_manager=agent_manager)
 
     import asyncio
     reactive_queue: asyncio.Queue = asyncio.Queue(maxsize=50)

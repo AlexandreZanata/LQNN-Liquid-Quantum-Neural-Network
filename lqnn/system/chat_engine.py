@@ -1,17 +1,17 @@
-"""Chat engine v3 -- Quantum Coherence Pipeline.
+"""Chat engine v4 -- Quantum Coherence Pipeline with Active Agents.
 
-Replaces the single-shot LLM call with a multi-pass generation strategy
-that produces 10x more output while maintaining coherence:
+v4 adds real-time agent search: when a query needs live data (date, web
+search, current events) the engine runs BrowserAgent synchronously BEFORE
+generating the LLM response, injecting real results into the context.
 
-Phase 1 -- Outline:     LLM plans the answer structure (~150 tokens)
-Phase 2 -- Sections:    LLM generates each section with focused context (~600 tokens each)
-Phase 3 -- Verify:      LLM checks coherence against source context (~100 tokens)
+Generation pipeline:
+Phase 0 -- Agent: If needed, search the web and gather real-time data
+Phase 1 -- Outline: LLM plans the answer structure (~150 tokens)
+Phase 2 -- Sections: LLM generates each section with focused context
+Phase 3 -- Verify: LLM checks coherence against source context
 
-Simple queries (short, high confidence) use a fast single-pass path with
-1500 tokens (3-5x current) to avoid unnecessary latency.
-
-v3 also injects conversation history (last 5 turns) into every prompt,
-giving the model continuity and preventing hallucinated repetition.
+Simple queries use a fast single-pass path with 1500 tokens.
+System context (date, time) is always injected.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ import logging
 import re
 import threading
 import time
+from datetime import datetime, timezone
 from typing import Callable
 
 from lqnn.core.associative_memory import AssociativeMemory, CollapseResult, _is_coherent
@@ -35,6 +36,20 @@ LLM_LOADING_MSG = (
 )
 
 REACTIVE_CONFIDENCE_THRESHOLD = 0.08
+
+AGENT_SEARCH_TIMEOUT_S = 12
+AGENT_SEARCH_MAX_CHARS = 3000
+
+_REALTIME_PATTERNS = re.compile(
+    r"\b(today|hoje|hoy|agora|now|current|atual|weather|clima|tempo|"
+    r"preço|price|cotação|cotacao|notícia|noticia|news|latest|"
+    r"que dia|what day|what date|que horas|what time|"
+    r"quem ganhou|who won|resultado|result|score|"
+    r"busque|search|pesquise|procure|find me|look up|"
+    r"busca ativa|active search|pesquisar na web|web search|"
+    r"descubra|discover|agente|agent)\b",
+    re.IGNORECASE,
+)
 
 
 class _CancelledError(Exception):
@@ -74,10 +89,12 @@ class ChatEngine:
     GENERATION_TIMEOUT_S = 90
 
     def __init__(self, memory: AssociativeMemory, llm: LLMEngine,
-                 training_db: TrainingDB | None = None) -> None:
+                 training_db: TrainingDB | None = None,
+                 agent_manager=None) -> None:
         self.memory = memory
         self.llm = llm
         self.training_db = training_db
+        self._agent_manager = agent_manager
         self._chat_history: list[dict] = []
         self._learning_queue: asyncio.Queue | None = None
         self._reactive_callback: Callable | None = None
@@ -103,6 +120,100 @@ class ChatEngine:
     @property
     def chat_history(self) -> list[dict]:
         return self._chat_history
+
+    def set_agent_manager(self, agent_manager) -> None:
+        self._agent_manager = agent_manager
+
+    # ------------------------------------------------------------------ #
+    # System context + agent search                                        #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _system_context() -> str:
+        """Real-time system information always available to the LLM."""
+        now = datetime.now()
+        utc = datetime.now(timezone.utc)
+        return (
+            f"[SYSTEM] Current date: {now.strftime('%A, %B %d, %Y')} | "
+            f"Time: {now.strftime('%H:%M:%S')} (local) / "
+            f"{utc.strftime('%H:%M:%S')} UTC\n"
+        )
+
+    @staticmethod
+    def _needs_agent_search(user_text: str, confidence: float) -> bool:
+        """Decide whether to activate agents for real-time data."""
+        if _REALTIME_PATTERNS.search(user_text):
+            return True
+        if confidence < 0.10 and len(user_text.split()) >= 3:
+            return True
+        return False
+
+    def _run_agent_search(self, query: str,
+                          on_reasoning: Callable | None = None) -> str:
+        """Run a synchronous web search via BrowserAgent and return context.
+
+        Blocks for at most AGENT_SEARCH_TIMEOUT_S seconds.
+        """
+        if self._agent_manager is None:
+            return ""
+
+        browser = getattr(self._agent_manager, "browser", None)
+        if browser is None:
+            return ""
+
+        def _reason(msg: str) -> None:
+            if on_reasoning:
+                on_reasoning(msg)
+
+        _reason(f"Agent activating -- searching the web for: \"{query[:60]}\"")
+
+        async def _do_search():
+            search_result = await browser.search(query)
+            if not search_result.success or not search_result.results:
+                return ""
+
+            _reason(f"Found {len(search_result.results)} results — "
+                    f"fetching top pages...")
+            fragments = []
+            for r in search_result.results[:3]:
+                try:
+                    page = await browser.fetch_page(r["url"],
+                                                    download_images=False)
+                    if page.success and page.text:
+                        title = r.get("title", "")
+                        domain = r["url"].split("/")[2] if "/" in r["url"] else ""
+                        snippet = page.text[:800].strip()
+                        if snippet:
+                            fragments.append(
+                                f"[Source: {title} ({domain})]\n{snippet}"
+                            )
+                            _reason(f"  Fetched: {title[:50]} ({domain})")
+                except Exception:
+                    continue
+
+            if not fragments:
+                return ""
+            return "\n\n".join(fragments)[:AGENT_SEARCH_MAX_CHARS]
+
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    future = pool.submit(asyncio.run, _do_search())
+                    agent_context = future.result(timeout=AGENT_SEARCH_TIMEOUT_S)
+            else:
+                agent_context = asyncio.run(_do_search())
+        except Exception as exc:
+            log.warning("Agent search failed: %s", exc)
+            _reason(f"Agent search failed: {type(exc).__name__}")
+            return ""
+
+        if agent_context:
+            _reason(f"Agent search complete — {len(agent_context)} chars of live data")
+        else:
+            _reason("Agent search returned no usable results")
+        return agent_context
 
     # ------------------------------------------------------------------ #
     # Conversation memory                                                  #
@@ -413,39 +524,60 @@ class ChatEngine:
         conversation_prefix = self._build_conversation_prefix()
         coherence_passes = 0
 
+        sys_ctx = self._system_context()
+        agent_context = ""
+        if self._needs_agent_search(user_text, collapse.confidence):
+            agent_context = self._run_agent_search(user_text)
+
+        if agent_context:
+            enriched_context = (
+                f"=== LIVE AGENT SEARCH RESULTS ===\n{agent_context}\n\n"
+                f"=== STORED KNOWLEDGE ===\n{collapse.context}"
+            )
+        else:
+            enriched_context = collapse.context
+
         system_base = (
-            "You are LQNN, a quantum associative brain with deep knowledge. "
+            "You are LQNN, a quantum associative brain with deep knowledge "
+            "and active web-search agents. "
+            f"{sys_ctx}"
             "Answer questions thoroughly using provided context and your reasoning. "
+            "When agent search results are provided, use them as the primary source. "
             "Be comprehensive, accurate, and well-structured. "
             "Format with markdown: use **bold**, numbered lists, code blocks when appropriate."
         )
 
-        if collapse.confidence >= self.MIN_CONFIDENCE and collapse.context:
+        effective_confidence = collapse.confidence
+        if agent_context:
+            effective_confidence = max(effective_confidence, 0.5)
+
+        if effective_confidence >= self.MIN_CONFIDENCE and enriched_context:
             is_simple = self._is_simple_query(
-                user_text, collapse.confidence, multi_hop_count)
+                user_text, effective_confidence, multi_hop_count)
 
             if is_simple:
                 response = self._single_pass_generate(
-                    user_text, collapse.context, system_base,
+                    user_text, enriched_context, system_base,
                     conversation_prefix)
                 coherence_passes = 1
             else:
                 response = self._coherence_pipeline(
-                    user_text, collapse.context, system_base,
+                    user_text, enriched_context, system_base,
                     conversation_prefix)
                 coherence_passes = 3 + min(
                     COHERENCE_MAX_SECTIONS,
                     len(self._parse_outline_sections(response)))
 
-        elif collapse.confidence > 0:
+        elif effective_confidence > 0:
             partial_system = (
                 "You are LQNN, a quantum associative brain. You have partial knowledge. "
+                f"{sys_ctx}"
                 "Answer using what you know combined with general reasoning. "
                 "Be helpful and thorough. Format with markdown."
             )
             prompt = (
                 f"{conversation_prefix}"
-                f"Partial knowledge:\n{collapse.context}\n\n"
+                f"Partial knowledge:\n{enriched_context}\n\n"
                 f"Question: {user_text}\n\n"
                 f"Answer using the above knowledge combined with your general knowledge. "
                 f"Be comprehensive and well-structured."
@@ -461,11 +593,20 @@ class ChatEngine:
         else:
             general_system = (
                 "You are LQNN, a quantum associative brain that is always learning. "
+                f"{sys_ctx}"
                 "You can answer any question using your general intelligence. "
                 "Be thorough and well-structured. "
                 "Format with markdown: **bold**, numbered lists, code blocks."
             )
-            prompt = f"{conversation_prefix}{user_text}"
+            if enriched_context.strip():
+                prompt = (
+                    f"{conversation_prefix}"
+                    f"Available context:\n{enriched_context}\n\n"
+                    f"Question: {user_text}\n\n"
+                    f"Provide a thorough answer."
+                )
+            else:
+                prompt = f"{conversation_prefix}{user_text}"
             response = self.llm.generate(
                 prompt,
                 max_new_tokens=SINGLE_PASS_MAX_TOKENS,
@@ -615,24 +756,45 @@ class ChatEngine:
                 if top_concepts:
                     _reason(f"Top associations: {', '.join(top_concepts[:3])}")
 
+            sys_ctx = self._system_context()
+            agent_context = ""
+            if self._needs_agent_search(user_text, collapse.confidence):
+                agent_context = self._run_agent_search(
+                    user_text, on_reasoning=on_reasoning)
+
+            if agent_context:
+                enriched_context = (
+                    f"=== LIVE AGENT SEARCH RESULTS ===\n{agent_context}\n\n"
+                    f"=== STORED KNOWLEDGE ===\n{collapse.context}"
+                )
+            else:
+                enriched_context = collapse.context
+
+            effective_confidence = collapse.confidence
+            if agent_context:
+                effective_confidence = max(effective_confidence, 0.5)
+
             conversation_prefix = self._build_conversation_prefix()
             system_base = (
-                "You are LQNN, a quantum associative brain with deep knowledge. "
+                "You are LQNN, a quantum associative brain with deep knowledge "
+                "and active web-search agents. "
+                f"{sys_ctx}"
                 "Answer questions thoroughly using provided context and your reasoning. "
+                "When agent search results are provided, use them as the primary source. "
                 "Be comprehensive, accurate, and well-structured. "
                 "Format with markdown: use **bold**, numbered lists, code blocks."
             )
 
             is_simple = self._is_simple_query(
-                user_text, collapse.confidence, multi_hop_count)
+                user_text, effective_confidence, multi_hop_count)
 
-            if collapse.confidence >= self.MIN_CONFIDENCE and collapse.context:
+            if effective_confidence >= self.MIN_CONFIDENCE and enriched_context:
                 if is_simple:
                     _reason("Simple query — streaming single-pass response "
                             f"(up to {SINGLE_PASS_MAX_TOKENS} tokens)...")
                     prompt = (
                         f"{conversation_prefix}"
-                        f"Knowledge:\n{collapse.context}\n\n"
+                        f"Knowledge:\n{enriched_context}\n\n"
                         f"Question: {user_text}\n\n"
                         f"Provide a thorough, well-structured answer."
                     )
@@ -652,7 +814,7 @@ class ChatEngine:
 
                     outline_prompt = (
                         f"{conversation_prefix}"
-                        f"Knowledge:\n{collapse.context[:6000]}\n\n"
+                        f"Knowledge:\n{enriched_context[:6000]}\n\n"
                         f"Question: {user_text}\n\n"
                         f"Create a brief structured outline (3-5 sections) for "
                         f"a comprehensive answer. Output ONLY the outline as a "
@@ -676,7 +838,7 @@ class ChatEngine:
                         _reason("Outline too simple — falling back to single pass...")
                         prompt = (
                             f"{conversation_prefix}"
-                            f"Knowledge:\n{collapse.context}\n\n"
+                            f"Knowledge:\n{enriched_context}\n\n"
                             f"Question: {user_text}\n\n"
                             f"Provide a thorough, well-structured answer."
                         )
@@ -717,7 +879,7 @@ class ChatEngine:
 
                             section_prompt = (
                                 f"{conversation_prefix}"
-                                f"Knowledge:\n{collapse.context[:8000]}\n\n"
+                                f"Knowledge:\n{enriched_context[:8000]}\n\n"
                                 f"Question: {user_text}\n\n"
                                 f"Section {i + 1}/{len(sections)}: "
                                 f"{section_title}\n"
@@ -754,16 +916,17 @@ class ChatEngine:
 
                         response = "".join(full_response_parts).strip()
 
-            elif collapse.confidence > 0:
+            elif effective_confidence > 0:
                 _reason("Partial knowledge — streaming enhanced response...")
                 partial_system = (
                     "You are LQNN, a quantum associative brain with partial knowledge. "
+                    f"{sys_ctx}"
                     "Combine available knowledge with general reasoning. "
                     "Format with markdown."
                 )
                 prompt = (
                     f"{conversation_prefix}"
-                    f"Partial knowledge:\n{collapse.context}\n\n"
+                    f"Partial knowledge:\n{enriched_context}\n\n"
                     f"Question: {user_text}\n\n"
                     f"Answer comprehensively."
                 )
@@ -778,13 +941,27 @@ class ChatEngine:
                         on_token(chunk)
                 response = "".join(full_response).strip()
             else:
-                _reason("No stored knowledge — using general LLM capabilities...")
+                if enriched_context.strip():
+                    _reason("No stored knowledge but agent data available — "
+                            "streaming response...")
+                else:
+                    _reason("No stored knowledge — using general LLM "
+                            "capabilities...")
                 general_system = (
                     "You are LQNN, a quantum associative brain always learning. "
+                    f"{sys_ctx}"
                     "Give a thorough, well-structured answer. "
                     "Format with markdown."
                 )
-                prompt = f"{conversation_prefix}{user_text}"
+                if enriched_context.strip():
+                    prompt = (
+                        f"{conversation_prefix}"
+                        f"Available context:\n{enriched_context}\n\n"
+                        f"Question: {user_text}\n\n"
+                        f"Provide a thorough answer."
+                    )
+                else:
+                    prompt = f"{conversation_prefix}{user_text}"
                 full_response = []
                 for chunk in self.llm.generate_stream(
                     prompt, max_new_tokens=SINGLE_PASS_MAX_TOKENS,
