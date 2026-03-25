@@ -23,7 +23,9 @@ class TestJudgeAgent:
         assert reason == "text_too_short"
 
     def test_accept_valid_text(self):
-        ok, reason = self.judge.judge_text("This is a valid text about bananas and fruits.")
+        ok, reason = self.judge.judge_text(
+            "This is a valid text about bananas, tropical fruits, and a balanced diet."
+        )
         assert ok
         assert reason == "ok"
 

@@ -53,6 +53,7 @@ def mock_llm():
     llm = MagicMock()
     llm.ready = True
     llm.loading = False
+    llm.chat_active = False  # avoid MagicMock truthy default in self_play / gating
 
     def _generate(prompt, **kwargs):
         return "This is a test response from the mock LLM."
