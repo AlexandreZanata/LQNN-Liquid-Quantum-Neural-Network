@@ -74,7 +74,8 @@ class KnowledgeIngestionPipeline:
         self._ingested_hashes: set[str] = self._build_hash_index()
 
     def _load_history(self) -> list[dict]:
-        import json, os
+        import json
+        import os
         try:
             if os.path.exists(HISTORY_FILE):
                 with open(HISTORY_FILE, "r") as f:
@@ -94,7 +95,8 @@ class KnowledgeIngestionPipeline:
         return hashes
 
     def _save_history(self) -> None:
-        import json, os
+        import json
+        import os
         try:
             os.makedirs(os.path.dirname(HISTORY_FILE), exist_ok=True)
             with open(HISTORY_FILE, "w") as f:

@@ -259,7 +259,8 @@ class ContinuousTrainer:
 
     def _save_state(self) -> None:
         """Persist cycle and phase to disk so they survive container restarts."""
-        import json, os
+        import json
+        import os
         try:
             os.makedirs(os.path.dirname(self.STATE_FILE), exist_ok=True)
             state = {
@@ -280,7 +281,8 @@ class ContinuousTrainer:
 
     def _load_state(self) -> None:
         """Restore cycle/phase from disk if available."""
-        import json, os
+        import json
+        import os
         try:
             if os.path.exists(self.STATE_FILE):
                 with open(self.STATE_FILE, "r") as f:

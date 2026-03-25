@@ -13,7 +13,6 @@ import bz2
 import csv
 import gzip
 import logging
-import os
 import tarfile
 from dataclasses import dataclass, field
 from pathlib import Path

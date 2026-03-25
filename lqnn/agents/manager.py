@@ -479,8 +479,6 @@ class AgentManager:
             ok, reason = self.judge.judge_text(page.text)
             if ok:
                 sentences = self._extract_quality_sentences(page.text)
-                concept_vec = await asyncio.to_thread(
-                    self.memory.clip.encode_text, gap.concept)
 
                 for sentence in sentences[:8]:
                     if self.judge.is_boilerplate(sentence):

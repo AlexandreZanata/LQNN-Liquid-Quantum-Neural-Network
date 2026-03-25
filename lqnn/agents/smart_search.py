@@ -9,14 +9,13 @@ Search priority:
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass, field
 from urllib.parse import quote_plus
 
 import aiohttp
 
 from lqnn.agents.browser_agent import (
-    BrowserAgent, SearchResult, FetchResult, _HEADERS, FETCH_TIMEOUT,
+    BrowserAgent, SearchResult, _HEADERS, FETCH_TIMEOUT,
 )
 
 log = logging.getLogger(__name__)
@@ -209,7 +208,6 @@ class SmartSearchAgent:
                 title = item.get("title", "")
                 if title:
                     page_url = f"https://en.wikipedia.org/wiki/{quote_plus(title.replace(' ', '_'))}"
-                    snippet = re.sub(r'<[^>]+>', '', item.get("snippet", ""))
                     result.results.append({
                         "url": page_url,
                         "title": title,
