@@ -1,67 +1,83 @@
-# LQNN - Liquid Quantum Neural Network
+# LQNN v2 - Liquid Quantum Neural Network: Quantum Associative Brain
 
-Arquitetura onde a estrutura da rede representa a memoria.
+An AI system that learns like the human brain -- encoding concepts as associative
+vectors in a shared visual-linguistic space, with autonomous web crawling,
+volatile memory consolidation, and continuous self-evolution.
 
-## Estado atual
+## Architecture
 
-- Arquitetura profissional inicial criada com separacao por dominios: `core`, `learning`, `demo`, `experiments`.
-- Fase 1 implementada: `QuantumNeuron` com plasticidade por idade, decaimento e morte por inatividade.
-- Fase 2 implementada: `HebbianSynapse` com reforco por co-ativacao e enfraquecimento por dissociacao.
-- Fase 3 implementada: `LiquidNetwork` com crescimento e poda dinamicos por atividade/energia.
-- Fase 4 implementada: `OneShotLearner` com memoria estrutural por snapshots (`learning/one_shot.py`).
-- Fase 5 implementada: visualizacao em tempo real da topologia (`demo/visualizer.py`).
-- Fase 6 implementada: superposicao de topologias com colapso por energia livre (`core/quantum_state.py`).
-- Fase 7 base implementada: UI em tempo real com FastAPI + WebSocket + Canvas (`ui/app.py`).
-- Fase 8 base implementada: painel de interacao com comandos de estimulo/sono/reset/quantico.
-- Fase 9 implementada: executor automatico com log JSON (`experiments/auto_runner.py`).
-- Experimentos praticos ativos: `experiments/topology_log.py`, `experiments/energy_profile.py`, `experiments/vs_mlp.py`.
+- **OpenCLIP ViT-B/32**: Encodes images and text into the same 512-d vector space
+- **Phi-3.5-mini-instruct (4-bit)**: Text generation, association extraction, reasoning
+- **ChromaDB**: Persistent vector storage with volatility metadata
+- **MongoDB**: Training logs, chat history, agent activity
+- **Autonomous Agents**: Web crawling, content analysis, quality judging
 
-## Estrutura
+## How It Works
 
-```text
-lqnn/
-  core/
-  learning/
-  demo/
-  experiments/
+1. **See "banana"** -> CLIP encodes it into a vector
+2. **LLM generates associations**: yellow, sweet, fruit, monkey, tropical...
+3. **Each association becomes a CLIP vector** stored in ChromaDB
+4. **All vectors coexist in superposition** with volatility scores
+5. **On query**, the nearest vectors collapse to form an answer
+6. **Consolidation cycles** crystallize stable knowledge, prune unused concepts
+7. **Agents autonomously crawl** the web for images and text to learn from
+
+## Hardware Requirements
+
+- NVIDIA GPU with 8GB+ VRAM (tested on RTX 4060)
+- 32GB RAM
+- Docker with nvidia-container-toolkit
+
+## Quick Start (Docker)
+
+```bash
+docker compose up -d --build
 ```
 
-## Ambiente
+The brain starts learning automatically. Access the UI at:
+- Chat: http://localhost:8000/chat
+- Training Dashboard: http://localhost:8000/training
+
+## Local Development
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install numpy matplotlib tqdm
+source .venv/bin/activate
+pip install -r requirements.txt
+python main_loop.py
 ```
 
-## Como executar
+## Project Structure
 
-```bash
-.venv/bin/python demo/fase1_demo.py
-.venv/bin/python demo/fase2_demo.py
-.venv/bin/python -c "from core.network import LiquidNetwork; n=LiquidNetwork(); print(n.status())"
-.venv/bin/python demo/fase4_one_shot_demo.py
-.venv/bin/python demo/visualizer.py
-.venv/bin/python -c "from core.network import LiquidNetwork; from core.quantum_state import TopologySuperposition; import numpy as np; net=LiquidNetwork(); sup=TopologySuperposition(net, n_branches=4); sup.evolve(np.random.rand(23)); best, idx=sup.collapse(); print(best.status(), idx)"
-.venv/bin/python -m uvicorn ui.app:app --host 0.0.0.0 --port 8000
+```
+lqnn/
+  models/          # AI model wrappers (CLIP, Phi-3.5, downloader)
+  core/            # Vector store (ChromaDB), associative memory
+  agents/          # Web crawler, agent manager with judge
+  training/        # Continuous training loop
+  system/          # Chat engine, MongoDB logging
+ui/
+  app.py           # FastAPI application
+  controls.py      # UI controller
+  websocket_server.py
+  static/          # Chat + Training dashboard HTML/CSS/JS
+main_loop.py       # Entry point: starts everything
 ```
 
-## Testes praticos
+## API Endpoints
 
-```bash
-.venv/bin/python experiments/topology_log.py
-.venv/bin/python experiments/energy_profile.py
-.venv/bin/python experiments/vs_mlp.py
-.venv/bin/python experiments/auto_runner.py
-```
-
-## Download de modelo open source para testes
-
-```bash
-.venv/bin/python experiments/download_open_model.py
-```
-
-## Proximos passos
-
-1. Refinar criterio de similaridade topologica da Fase 4 para reduzir empates de score.
-2. Integrar logs de energia/topologia em CSV para analise longitudinal.
-3. Seguir sequencia de diretrizes e experimentos em `begining.md`.
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | /chat | Chat interface |
+| GET | /training | Training dashboard |
+| POST | /api/chat | Send chat message |
+| POST | /api/search | Trigger web search |
+| POST | /api/learn | Learn a concept |
+| GET | /api/brain/status | Full brain status |
+| GET | /api/training/status | Training metrics |
+| POST | /api/training/cycle | Manual training cycle |
+| GET | /api/agents/status | Agent status |
+| POST | /api/agents/cycle | Manual agent cycle |
+| POST | /api/consolidate | Run consolidation |
+| POST | /api/self-play | Run self-play cycle |
+| WS | /ws | WebSocket for real-time updates |

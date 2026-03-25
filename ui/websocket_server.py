@@ -1,119 +1,130 @@
-# Systems principle: a continuous event loop streams true internal state to
-# clients, enabling real-time observation of structural adaptation.
+"""WebSocket server for real-time UI updates."""
 
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from typing import Any
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import WebSocket, WebSocketDisconnect
 
 from ui.controls import UIController
 
+log = logging.getLogger(__name__)
+
 
 class WebSocketStateServer:
-    """Streams live network state and handles control messages."""
+    """Pushes brain state to connected UI clients at regular intervals."""
 
-    def __init__(self, controller: UIController, fps: int = 15) -> None:
+    FPS = 2
+
+    def __init__(self, controller: UIController) -> None:
         self.controller = controller
-        self.fps = max(10, min(20, fps))
         self._clients: set[WebSocket] = set()
-        self._task: asyncio.Task[Any] | None = None
+        self._task: asyncio.Task | None = None
         self._running = False
-        self._lock = asyncio.Lock()
 
     async def start(self) -> None:
-        if self._task is not None:
-            return
         self._running = True
         self._task = asyncio.create_task(self._broadcast_loop())
 
     async def stop(self) -> None:
         self._running = False
-        if self._task is not None:
+        if self._task:
             self._task.cancel()
             try:
                 await self._task
             except asyncio.CancelledError:
                 pass
-            self._task = None
 
-    async def connect(self, websocket: WebSocket) -> None:
-        await websocket.accept()
-        self._clients.add(websocket)
-        await websocket.send_json(self.controller.snapshot())
-
-    async def disconnect(self, websocket: WebSocket) -> None:
-        if websocket in self._clients:
-            self._clients.remove(websocket)
-
-    async def handle_message(self, websocket: WebSocket, raw: str) -> None:
+    async def connect(self, ws: WebSocket) -> None:
+        await ws.accept()
+        self._clients.add(ws)
         try:
-            message = json.loads(raw)
-        except json.JSONDecodeError:
-            await websocket.send_json({"type": "error", "message": "JSON invalido"})
-            return
+            snapshot = self.controller.snapshot()
+            await ws.send_json(snapshot)
+        except Exception:
+            pass
 
-        action = message.get("action", "")
-        async with self._lock:
-            if action == "stimulate":
-                text = str(message.get("text", ""))
-                state = self.controller.stimulate_text(text) if text else self.controller.stimulate_random()
-            elif action == "stimulate_vector":
-                state = self.controller.stimulate_vector(message.get("values", []))
-            elif action == "sleep":
-                state = self.controller.sleep(int(message.get("cycles", 1)))
-            elif action == "reset":
-                state = self.controller.reset_network()
-            elif action == "toggle_quantum":
-                enabled = message.get("enabled")
-                state = self.controller.toggle_quantum_mode(enabled if isinstance(enabled, bool) else None)
-            elif action == "toggle_auto":
-                state = self.controller.set_auto_stimulate(bool(message.get("enabled", True)))
+    def disconnect(self, ws: WebSocket) -> None:
+        self._clients.discard(ws)
+
+    async def handle_message(self, ws: WebSocket, data: dict[str, Any]) -> None:
+        action = data.get("action", "")
+        try:
+            if action == "chat":
+                result = self.controller.chat_turn(data.get("text", ""))
+                await ws.send_json({"type": "chat_response", **result})
+
+            elif action == "search":
+                result = await self.controller.search(data.get("query", ""))
+                await ws.send_json({"type": "search_result", **result})
+
+            elif action == "learn":
+                result = self.controller.learn_concept(data.get("concept", ""))
+                await ws.send_json({"type": "learn_result", **result})
+
+            elif action == "consolidate":
+                result = self.controller.consolidate()
+                await ws.send_json({"type": "consolidation_result", **result})
+
+            elif action == "self_play":
+                result = self.controller.self_play()
+                await ws.send_json({"type": "self_play_result", **result})
+
+            elif action == "train_cycle":
+                result = await self.controller.train_cycle()
+                await ws.send_json({"type": "train_result", **result})
+
+            elif action == "agent_cycle":
+                result = await self.controller.run_agent_cycle()
+                await ws.send_json({"type": "agent_result", **result})
+
             elif action == "get_state":
-                state = self.controller.snapshot()
+                snapshot = self.controller.snapshot()
+                await ws.send_json(snapshot)
+
             else:
-                await websocket.send_json({"type": "error", "message": f"Acao desconhecida: {action}"})
-                return
-        await websocket.send_json(state)
+                await ws.send_json({"type": "error", "message": f"Unknown action: {action}"})
+
+        except Exception as exc:
+            log.error("WS action '%s' failed: %s", action, exc, exc_info=True)
+            await ws.send_json({"type": "error", "message": str(exc)})
 
     async def _broadcast_loop(self) -> None:
-        frame_time = 1.0 / float(self.fps)
         while self._running:
-            async with self._lock:
-                payload = self.controller.idle_step()
-
-            to_remove: list[WebSocket] = []
-            for client in self._clients:
+            if self._clients:
                 try:
-                    await client.send_json(payload)
-                except Exception:
-                    to_remove.append(client)
+                    snapshot = self.controller.snapshot()
+                    dead: list[WebSocket] = []
+                    for ws in list(self._clients):
+                        try:
+                            await ws.send_json(snapshot)
+                        except Exception:
+                            dead.append(ws)
+                    for ws in dead:
+                        self._clients.discard(ws)
+                except Exception as exc:
+                    log.error("Broadcast error: %s", exc)
 
-            for client in to_remove:
-                await self.disconnect(client)
-
-            await asyncio.sleep(frame_time)
+            await asyncio.sleep(1.0 / self.FPS)
 
 
-def register_websocket_routes(app: FastAPI, server: WebSocketStateServer) -> None:
-    """Register startup/shutdown hooks and websocket endpoint."""
-
-    @app.on_event("startup")
-    async def _startup() -> None:
-        await server.start()
-
-    @app.on_event("shutdown")
-    async def _shutdown() -> None:
-        await server.stop()
-
+def register_websocket_routes(app, server: WebSocketStateServer) -> None:
     @app.websocket("/ws")
-    async def websocket_endpoint(websocket: WebSocket) -> None:
-        await server.connect(websocket)
+    async def websocket_endpoint(ws: WebSocket):
+        await server.connect(ws)
         try:
             while True:
-                data = await websocket.receive_text()
-                await server.handle_message(websocket, data)
+                text = await ws.receive_text()
+                try:
+                    data = json.loads(text)
+                except json.JSONDecodeError:
+                    await ws.send_json({"type": "error", "message": "Invalid JSON"})
+                    continue
+                await server.handle_message(ws, data)
         except WebSocketDisconnect:
-            await server.disconnect(websocket)
+            server.disconnect(ws)
+        except Exception:
+            server.disconnect(ws)

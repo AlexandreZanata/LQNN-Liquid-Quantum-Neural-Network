@@ -1,46 +1,160 @@
-# System principle: a web interface exposes the living topology as it evolves,
-# so experimentation is immediate, observable, and interactive.
+"""FastAPI application -- serves the LQNN v2 web interface."""
 
 from __future__ import annotations
 
-from pathlib import Path
+import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
-from ui.controls import UIController
-from ui.websocket_server import WebSocketStateServer, register_websocket_routes
+log = logging.getLogger(__name__)
+
+_controller = None
+_ws_server = None
+_trainer = None
 
 
-BASE_DIR = Path(__file__).resolve().parent
-STATIC_DIR = BASE_DIR / "static"
+class ChatRequest(BaseModel):
+    text: str
 
 
-def create_app() -> FastAPI:
-    app = FastAPI(title="LQNN Live UI", version="0.1.0")
+class SearchRequest(BaseModel):
+    query: str
 
-    controller = UIController(max_neurons=300)
-    server = WebSocketStateServer(controller=controller, fps=15)
-    register_websocket_routes(app, server)
 
-    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+class LearnRequest(BaseModel):
+    concept: str
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    if _ws_server:
+        await _ws_server.start()
+    if _trainer:
+        await _trainer.start()
+    yield
+    if _trainer:
+        await _trainer.stop()
+    if _ws_server:
+        await _ws_server.stop()
+
+
+def create_app(controller=None, ws_server=None, trainer=None) -> FastAPI:
+    global _controller, _ws_server, _trainer
+    _controller = controller
+    _ws_server = ws_server
+    _trainer = trainer
+
+    app = FastAPI(title="LQNN v2 - Quantum Associative Brain", lifespan=lifespan)
+    app.mount("/static", StaticFiles(directory="ui/static"), name="static")
+
+    if ws_server:
+        from ui.websocket_server import register_websocket_routes
+        register_websocket_routes(app, ws_server)
+
+    # -- Pages --
 
     @app.get("/")
-    async def index() -> FileResponse:
-        return FileResponse(STATIC_DIR / "index.html")
+    async def root():
+        return RedirectResponse("/chat")
+
+    @app.get("/chat")
+    async def chat_page():
+        return FileResponse("ui/static/chat.html")
+
+    @app.get("/training")
+    async def training_page():
+        return FileResponse("ui/static/training.html")
+
+    # -- Health --
 
     @app.get("/health")
-    async def health() -> dict[str, str]:
-        return {"status": "ok"}
+    async def health():
+        return {"status": "alive", "version": "2.0.0"}
+
+    # -- Chat API --
+
+    @app.post("/api/chat")
+    async def api_chat(req: ChatRequest):
+        if not _controller:
+            return {"error": "not_initialized"}
+        return _controller.chat_turn(req.text)
+
+    # -- Search API --
+
+    @app.post("/api/search")
+    async def api_search(req: SearchRequest):
+        if not _controller:
+            return {"error": "not_initialized"}
+        return await _controller.search(req.query)
+
+    # -- Learn API --
+
+    @app.post("/api/learn")
+    async def api_learn(req: LearnRequest):
+        if not _controller:
+            return {"error": "not_initialized"}
+        return _controller.learn_concept(req.concept)
+
+    # -- Memory / Brain Status --
+
+    @app.get("/api/brain/status")
+    async def brain_status():
+        if not _controller:
+            return {"error": "not_initialized"}
+        return _controller.snapshot()
+
+    @app.get("/api/memory/stats")
+    async def memory_stats():
+        if not _controller:
+            return {"error": "not_initialized"}
+        return _controller.memory.stats()
+
+    # -- Training --
+
+    @app.get("/api/training/status")
+    async def training_status():
+        if not _trainer:
+            return {"error": "not_initialized"}
+        return _trainer.status()
+
+    @app.post("/api/training/cycle")
+    async def training_cycle():
+        if not _controller:
+            return {"error": "not_initialized"}
+        return await _controller.train_cycle()
+
+    # -- Agents --
+
+    @app.get("/api/agents/status")
+    async def agent_status():
+        if not _controller:
+            return {"error": "not_initialized"}
+        return _controller.agent_manager.stats()
+
+    @app.post("/api/agents/cycle")
+    async def agent_cycle():
+        if not _controller:
+            return {"error": "not_initialized"}
+        return await _controller.run_agent_cycle()
+
+    # -- Consolidation --
+
+    @app.post("/api/consolidate")
+    async def consolidate():
+        if not _controller:
+            return {"error": "not_initialized"}
+        return _controller.consolidate()
+
+    # -- Self-play --
+
+    @app.post("/api/self-play")
+    async def self_play():
+        if not _controller:
+            return {"error": "not_initialized"}
+        return _controller.self_play()
 
     return app
-
-
-app = create_app()
-
-
-if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run("ui.app:app", host="0.0.0.0", port=8000, reload=False)

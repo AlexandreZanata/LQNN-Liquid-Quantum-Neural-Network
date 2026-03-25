@@ -1,4 +1,3 @@
-"""LQNN package root.
+"""LQNN - Liquid Quantum Neural Network: Quantum Associative Brain."""
 
-Liquid Quantum Neural Network: architecture where structure is memory.
-"""
+__version__ = "2.0.0"

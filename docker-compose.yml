@@ -1,0 +1,40 @@
+services:
+  lqnn:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: lqnn-brain
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - MONGO_URI=mongodb://mongo:27017/lqnn
+      - MONGO_DB=lqnn
+      - HF_HOME=/app/models/cache
+      - TORCH_HOME=/app/models/cache
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - model-cache:/app/models/cache
+    depends_on:
+      - mongo
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+
+volumes:
+  mongo-data:
+  model-cache:

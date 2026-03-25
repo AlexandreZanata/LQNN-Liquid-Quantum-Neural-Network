@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LQNN v2 - Training Dashboard</title>
+  <link rel="stylesheet" href="/static/training.css" />
+</head>
+<body>
+  <div class="layout">
+    <header class="topbar">
+      <h1>LQNN v2 - Training Dashboard</h1>
+      <nav>
+        <a href="/chat">Chat</a>
+        <a href="/training" class="active">Training</a>
+      </nav>
+      <span id="status-indicator" class="status offline">OFFLINE</span>
+    </header>
+
+    <main class="dashboard">
+      <div class="row">
+        <div class="card hero">
+          <h2>Brain Status</h2>
+          <div class="metric-row">
+            <div class="metric">
+              <span class="label">Concepts</span>
+              <span class="value" id="m-concepts">--</span>
+            </div>
+            <div class="metric">
+              <span class="label">Associations</span>
+              <span class="value" id="m-associations">--</span>
+            </div>
+            <div class="metric">
+              <span class="label">Learning Cycles</span>
+              <span class="value" id="m-learn-count">--</span>
+            </div>
+            <div class="metric">
+              <span class="label">Queries</span>
+              <span class="value" id="m-query-count">--</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Training Engine</h2>
+          <div id="t-running" class="badge stopped">STOPPED</div>
+          <div class="stat">Cycle: <span id="t-cycle">--</span></div>
+          <div class="stat">Uptime: <span id="t-uptime">--</span></div>
+          <div class="stat">Concepts/cycle: <span id="t-concepts-cycle">--</span></div>
+          <div class="stat">Images/cycle: <span id="t-images-cycle">--</span></div>
+          <div class="stat">Pruned: <span id="t-pruned">--</span></div>
+          <div class="stat">Crystallized: <span id="t-crystallized">--</span></div>
+          <div class="stat">Cycle duration: <span id="t-duration">--</span></div>
+          <button id="btn-manual-cycle">Run Manual Cycle</button>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="card">
+          <h2>Agent Manager</h2>
+          <div class="stat">Cycle: <span id="a-cycle">--</span></div>
+          <div class="stat">Online: <span id="a-online">--</span></div>
+          <div class="stat">Gap queue: <span id="a-gaps">--</span></div>
+          <button id="btn-agent-cycle">Run Agent Cycle</button>
+        </div>
+
+        <div class="card">
+          <h2>Models</h2>
+          <div class="stat">CLIP: <span id="m-clip">--</span></div>
+          <div class="stat">LLM: <span id="m-llm">--</span></div>
+        </div>
+
+        <div class="card wide">
+          <h2>Training Log</h2>
+          <div id="training-log" class="log-output"></div>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="card wide">
+          <h2>Concept Growth</h2>
+          <canvas id="chart-concepts" width="600" height="200"></canvas>
+        </div>
+      </div>
+    </main>
+  </div>
+  <script src="/static/training.js"></script>
+</body>
+</html>
