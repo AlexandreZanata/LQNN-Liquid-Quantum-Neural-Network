@@ -1,4 +1,4 @@
-"""Shared fixtures for LQNN v2 tests.
+"""Shared fixtures for LQNN v3 tests.
 
 All tests run WITHOUT GPU and WITHOUT downloading real AI models.
 We mock CLIP and LLM at the fixture level so tests are fast and CI-friendly.
@@ -52,15 +52,18 @@ def mock_llm():
     """Return a mock LLMEngine that produces canned responses."""
     llm = MagicMock()
     llm.ready = True
+    llm.loading = False
 
     def _generate(prompt, **kwargs):
         return "This is a test response from the mock LLM."
 
-    def _extract_associations(concept, n=20):
+    def _extract_associations(concept, n=30):
         base = ["yellow", "sweet", "fruit", "tropical", "monkey",
                 "potassium", "peel", "bunch", "ripe", "organic",
                 "smoothie", "healthy", "curved", "plantain", "dessert",
-                "snack", "energy", "vitamin", "fiber", "natural"]
+                "snack", "energy", "vitamin", "fiber", "natural",
+                "soft", "creamy", "elongated", "green", "brown",
+                "breakfast", "lunch", "recipe", "garden", "market"]
         return base[:n]
 
     def _describe_concept(concept):
@@ -69,10 +72,14 @@ def mock_llm():
     def _answer_with_context(question, context, **kwargs):
         return f"Based on the knowledge: {context[:50]}... the answer is related."
 
+    def _judge_relevance(text, concept):
+        return 0.7
+
     llm.generate = MagicMock(side_effect=_generate)
     llm.extract_associations = MagicMock(side_effect=_extract_associations)
     llm.describe_concept = MagicMock(side_effect=_describe_concept)
     llm.answer_with_context = MagicMock(side_effect=_answer_with_context)
+    llm.judge_relevance = MagicMock(side_effect=_judge_relevance)
     llm.load = MagicMock()
     return llm
 

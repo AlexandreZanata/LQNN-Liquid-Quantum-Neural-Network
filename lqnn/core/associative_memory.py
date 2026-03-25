@@ -6,6 +6,9 @@ Implements:
 - Volatility decay: frequently accessed vectors become stable (crystallize),
   unused ones decay and are eventually pruned
 - Consolidation: periodic cycles that promote short-term to long-term memory
+- Visual-first learning: images weighted 70/30 over text (human brain is ~80% visual)
+- Multi-image learning: average multiple image vectors for robust representations
+- Network crystallization: concepts with many interconnections stabilize faster
 """
 
 from __future__ import annotations
@@ -22,6 +25,9 @@ from lqnn.models.clip_encoder import CLIPEncoder
 from lqnn.models.llm_engine import LLMEngine
 
 log = logging.getLogger(__name__)
+
+IMAGE_WEIGHT = 0.7
+TEXT_WEIGHT = 0.3
 
 
 @dataclass
@@ -58,6 +64,8 @@ class AssociativeMemory:
     PRUNE_THRESHOLD = 0.95
     CRYSTALLIZE_THRESHOLD = 0.2
     MIN_CONFIDENCE_TO_ANSWER = 0.3
+    NETWORK_CRYSTALLIZATION_BONUS = 0.01
+    USER_CURATED_VOLATILITY_BONUS = 0.02
 
     def __init__(self, store: VectorStore, clip: CLIPEncoder,
                  llm: LLMEngine) -> None:
@@ -70,15 +78,13 @@ class AssociativeMemory:
     # -- Learning --
 
     def learn_concept(self, concept: str, image: bytes | None = None,
-                      source: str = "manual") -> QuantumState:
+                      source: str = "manual",
+                      initial_confidence: float = 0.5) -> QuantumState:
         """Learn a concept by encoding it and generating associations.
 
-        This is the core 'human-like' learning step:
-        1. Encode the concept text with CLIP (text vector)
-        2. If image provided, encode with CLIP (visual vector) and average
-        3. Ask LLM for associations
-        4. Encode each association with CLIP
-        5. Store everything in ChromaDB with initial volatility=1.0
+        Visual-first learning: when an image is available, the vector is
+        weighted 70% image / 30% text, mirroring how the human brain
+        processes ~80% of information visually.
         """
         concept_lower = concept.strip().lower()
         concept_id = self._make_id(concept_lower)
@@ -87,7 +93,7 @@ class AssociativeMemory:
 
         if image is not None:
             img_vec = self.clip.encode_image(image)
-            primary_vec = (text_vec + img_vec) / 2.0
+            primary_vec = IMAGE_WEIGHT * img_vec + TEXT_WEIGHT * text_vec
             primary_vec = primary_vec / np.linalg.norm(primary_vec)
         else:
             primary_vec = text_vec
@@ -98,7 +104,7 @@ class AssociativeMemory:
             concept=concept_lower,
             source=source,
             volatility=1.0,
-            confidence=0.5,
+            confidence=initial_confidence,
         )
         self.store.add_concept(entry)
 
@@ -114,7 +120,63 @@ class AssociativeMemory:
             primary_vector=primary_vec,
             associations=associations,
             volatility=1.0,
-            confidence=0.5,
+            confidence=initial_confidence,
+        )
+
+    def learn_concept_multi_image(self, concept: str,
+                                  images: list[bytes],
+                                  source: str = "multi_image") -> QuantumState:
+        """Learn from multiple images of the same concept.
+
+        Averages all image vectors with the text vector for a more robust
+        representation, like seeing a banana from many angles and contexts.
+        """
+        concept_lower = concept.strip().lower()
+        concept_id = self._make_id(concept_lower)
+
+        text_vec = self.clip.encode_text(concept_lower)
+
+        img_vecs = []
+        for img in images:
+            try:
+                v = self.clip.encode_image(img)
+                img_vecs.append(v)
+            except Exception:
+                continue
+
+        if img_vecs:
+            avg_img_vec = np.mean(img_vecs, axis=0)
+            avg_img_vec = avg_img_vec / np.linalg.norm(avg_img_vec)
+            primary_vec = IMAGE_WEIGHT * avg_img_vec + TEXT_WEIGHT * text_vec
+            primary_vec = primary_vec / np.linalg.norm(primary_vec)
+        else:
+            primary_vec = text_vec
+
+        confidence = min(0.8, 0.5 + 0.05 * len(img_vecs))
+
+        entry = VectorEntry(
+            id=concept_id,
+            vector=primary_vec,
+            concept=concept_lower,
+            source=source,
+            volatility=0.8,
+            confidence=confidence,
+        )
+        self.store.add_concept(entry)
+
+        associations = self._generate_associations(concept_lower, primary_vec)
+
+        self._learn_count += 1
+        log.info(
+            "Learned '%s' from %d images with %d associations",
+            concept_lower, len(img_vecs), len(associations),
+        )
+        return QuantumState(
+            concept=concept_lower,
+            primary_vector=primary_vec,
+            associations=associations,
+            volatility=0.8,
+            confidence=confidence,
         )
 
     def learn_from_image(self, image: bytes, source_url: str = "") -> QuantumState | None:
@@ -144,7 +206,7 @@ class AssociativeMemory:
     def _generate_associations(self, concept: str,
                                primary_vec: np.ndarray) -> list[dict]:
         """Generate and store association vectors for a concept."""
-        assoc_words = self.llm.extract_associations(concept, n=20)
+        assoc_words = self.llm.extract_associations(concept, n=30)
         associations = []
 
         if assoc_words:
@@ -221,9 +283,10 @@ class AssociativeMemory:
     # -- Consolidation --
 
     def consolidate(self) -> dict:
-        """Run a consolidation cycle.
+        """Run a consolidation cycle with network-aware crystallization.
 
         - Decrease volatility of frequently accessed concepts (crystallize)
+        - Concepts with many association links crystallize faster
         - Increase volatility of unused concepts
         - Prune concepts that exceed the volatility threshold
         """
@@ -238,21 +301,43 @@ class AssociativeMemory:
         if not all_concepts["ids"]:
             return {"pruned": 0, "crystallized": 0, "decayed": 0}
 
+        assoc_stats = self.store._associations.get(
+            include=["metadatas"],
+        )
+        concept_link_counts: dict[str, int] = {}
+        if assoc_stats and assoc_stats["metadatas"]:
+            for meta in assoc_stats["metadatas"]:
+                src = meta.get("source_concept", "")
+                if src:
+                    concept_link_counts[src] = concept_link_counts.get(src, 0) + 1
+
         for i, cid in enumerate(all_concepts["ids"]):
             meta = all_concepts["metadatas"][i]
             volatility = meta.get("volatility", 1.0)
             access_count = meta.get("access_count", 0)
             last_accessed = meta.get("last_accessed", now)
+            concept_name = meta.get("concept", "")
             age_hours = (now - last_accessed) / 3600
+
+            link_count = concept_link_counts.get(concept_name, 0)
+            network_bonus = self.NETWORK_CRYSTALLIZATION_BONUS * min(link_count, 30)
+
+            is_curated = (
+                meta.get("curation") == "user_curated"
+                or str(meta.get("source", "")).startswith("user_curated:")
+            )
+            curation_bonus = self.USER_CURATED_VOLATILITY_BONUS if is_curated else 0.0
 
             if access_count > 5:
                 new_vol = max(0.0, volatility - self.VOLATILITY_DECAY_RATE *
-                              min(access_count, 50))
+                              min(access_count, 50) - network_bonus - curation_bonus)
                 if new_vol <= self.CRYSTALLIZE_THRESHOLD:
                     crystallized += 1
             elif age_hours > 24:
-                new_vol = min(1.0, volatility + self.VOLATILITY_INCREASE_RATE *
-                              min(age_hours / 24, 10))
+                decay = self.VOLATILITY_INCREASE_RATE * min(age_hours / 24, 10)
+                if is_curated:
+                    decay *= 0.5
+                new_vol = min(1.0, volatility + decay)
                 if new_vol >= self.PRUNE_THRESHOLD:
                     self.store.delete_concept(cid)
                     pruned += 1
@@ -275,42 +360,177 @@ class AssociativeMemory:
     # -- Self-play --
 
     def self_play_cycle(self) -> dict:
-        """Query own knowledge to find contradictions and reinforce patterns.
+        """Enhanced self-play with Q&A validation.
 
-        Picks a random stored concept, queries for it, checks if the
-        retrieved associations are consistent.
+        1. Pick a random concept with stored context
+        2. Generate a question about it
+        3. Answer using only the knowledge base
+        4. Score answer quality
+        5. If quality is low, reinforce learning
         """
         count = self.store.concept_count()
         if count == 0:
             return {"action": "skip", "reason": "no_concepts"}
 
-        all_ids = self.store._concepts.get(
-            include=["documents"],
+        all_data = self.store._concepts.get(
+            include=["documents", "metadatas"],
             limit=min(count, 100),
         )
-        if not all_ids["documents"]:
+        if not all_data["documents"]:
             return {"action": "skip", "reason": "empty_documents"}
 
-        idx = np.random.randint(len(all_ids["documents"]))
-        concept = all_ids["documents"][idx]
+        idx = np.random.randint(len(all_data["documents"]))
+        concept = all_data["documents"][idx]
+        meta = all_data["metadatas"][idx] if all_data["metadatas"] else {}
 
-        result = self.query(concept)
+        full_text = meta.get("full_text", "")
 
-        if result.confidence < 0.5 and count > 10:
+        collapse = self.query(concept)
+
+        if full_text and len(full_text) > 50 and self.llm.ready:
+            try:
+                question = self.llm.generate(
+                    f'Based on this knowledge: "{full_text[:500]}"\n\n'
+                    f'Generate ONE specific question that tests understanding '
+                    f'of the concept "{concept}". Reply with ONLY the question.',
+                    max_new_tokens=60,
+                    temperature=0.7,
+                )
+                question = question.strip()
+
+                if question and len(question) > 10:
+                    answer = self.llm.answer_with_context(
+                        question, collapse.context, max_new_tokens=200,
+                    )
+
+                    quality_raw = self.llm.generate(
+                        f'Rate this answer quality from 0 to 10.\n'
+                        f'Question: {question}\n'
+                        f'Answer: {answer[:300]}\n'
+                        f'Reply with ONLY a number.',
+                        max_new_tokens=5,
+                        temperature=0.1,
+                    )
+
+                    import re
+                    match = re.search(r"(\d+(?:\.\d+)?)", quality_raw)
+                    quality = float(match.group(1)) if match else 5.0
+
+                    if quality < 5.0 and count > 10:
+                        new_assocs = self._generate_associations(
+                            concept, self.clip.encode_text(concept))
+                        return {
+                            "action": "reinforced",
+                            "concept": concept,
+                            "question": question[:100],
+                            "quality_score": quality,
+                            "new_associations": len(new_assocs),
+                            "confidence": collapse.confidence,
+                        }
+
+                    return {
+                        "action": "validated",
+                        "concept": concept,
+                        "question": question[:100],
+                        "quality_score": quality,
+                        "confidence": collapse.confidence,
+                    }
+            except Exception as e:
+                log.debug("Self-play Q&A failed: %s", e)
+
+        if collapse.confidence < 0.5 and count > 10:
             new_assocs = self._generate_associations(
                 concept, self.clip.encode_text(concept))
             return {
                 "action": "reinforced",
                 "concept": concept,
                 "new_associations": len(new_assocs),
-                "confidence_before": result.confidence,
+                "confidence_before": collapse.confidence,
             }
 
         return {
             "action": "validated",
             "concept": concept,
-            "confidence": result.confidence,
+            "confidence": collapse.confidence,
         }
+
+    # -- Cleanup --
+
+    def cleanup_garbage(self) -> dict:
+        """Scan all stored concepts and remove web boilerplate / junk.
+
+        Returns a summary of how many concepts were purged.
+        """
+        from lqnn.agents.manager import JudgeAgent
+
+        all_data = self.store._concepts.get(
+            include=["documents", "metadatas"],
+        )
+        if not all_data["ids"]:
+            return {"purged": 0, "total": 0}
+
+        purged = 0
+        for i, cid in enumerate(all_data["ids"]):
+            doc = all_data["documents"][i] or ""
+            meta = all_data["metadatas"][i] or {}
+
+            is_curated = (
+                meta.get("curation") == "user_curated"
+                or str(meta.get("source", "")).startswith("user_curated:")
+            )
+            if is_curated:
+                continue
+
+            if JudgeAgent.is_boilerplate(doc):
+                self.store.delete_concept(cid)
+                purged += 1
+                continue
+
+            alpha_count = sum(c.isalpha() or c.isspace() for c in doc)
+            if len(doc) > 0 and alpha_count / len(doc) < 0.5:
+                self.store.delete_concept(cid)
+                purged += 1
+                continue
+
+            if len(doc) < 10 or len(doc) > 200:
+                source = str(meta.get("source", ""))
+                if source not in ("seed", "manual", "user_query") and not is_curated:
+                    if len(doc) > 200:
+                        self.store.delete_concept(cid)
+                        purged += 1
+                        continue
+
+        result = {
+            "purged": purged,
+            "total": len(all_data["ids"]),
+            "remaining": len(all_data["ids"]) - purged,
+        }
+        log.info("Garbage cleanup: %s", result)
+        return result
+
+    # -- Training Questions --
+
+    def generate_training_questions(self, concept: str, n: int = 5) -> list[str]:
+        """Generate context-aware training questions from stored knowledge."""
+        context_result = self.query(concept, n_results=3)
+        if not context_result.context:
+            return []
+
+        raw = self.llm.generate(
+            f"Based on this knowledge:\n{context_result.context}\n\n"
+            f"Generate {n} specific, deep questions about '{concept}' "
+            f"that test real understanding. Output as a numbered list, "
+            f"one question per line.",
+            max_new_tokens=300,
+            temperature=0.7,
+        )
+        import re
+        questions = []
+        for line in raw.strip().splitlines():
+            cleaned = re.sub(r"^\d+[\.\)]\s*", "", line.strip())
+            if cleaned and len(cleaned) > 10 and cleaned.endswith("?"):
+                questions.append(cleaned)
+        return questions[:n]
 
     # -- Stats --
 

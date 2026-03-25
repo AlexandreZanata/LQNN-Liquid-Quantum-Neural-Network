@@ -1,11 +1,13 @@
-"""FastAPI application -- serves the LQNN v2 web interface."""
+"""FastAPI application -- serves the LQNN v3 web interface."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -29,11 +31,19 @@ class LearnRequest(BaseModel):
     concept: str
 
 
+class KnowledgeUrlRequest(BaseModel):
+    url: str
+    tags: list[str] = []
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if _ws_server:
         await _ws_server.start()
-    if _trainer:
+    auto_train = os.environ.get("AUTO_TRAIN_ON_START", "0").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+    if _trainer and auto_train:
         await _trainer.start()
     yield
     if _trainer:
@@ -48,32 +58,48 @@ def create_app(controller=None, ws_server=None, trainer=None) -> FastAPI:
     _ws_server = ws_server
     _trainer = trainer
 
-    app = FastAPI(title="LQNN v2 - Quantum Associative Brain", lifespan=lifespan)
+    app = FastAPI(title="LQNN v3 - Quantum Associative Brain", lifespan=lifespan)
     app.mount("/static", StaticFiles(directory="ui/static"), name="static")
 
     if ws_server:
         from ui.websocket_server import register_websocket_routes
         register_websocket_routes(app, ws_server)
 
-    # -- Pages --
+    # -- Pages (unified single-page terminal) --
 
     @app.get("/")
     async def root():
-        return RedirectResponse("/chat")
+        return RedirectResponse("/terminal")
+
+    @app.get("/terminal")
+    async def terminal_page():
+        return FileResponse("ui/static/terminal.html")
 
     @app.get("/chat")
     async def chat_page():
-        return FileResponse("ui/static/chat.html")
+        return RedirectResponse("/terminal")
 
     @app.get("/training")
     async def training_page():
-        return FileResponse("ui/static/training.html")
+        return RedirectResponse("/terminal")
 
     # -- Health --
 
     @app.get("/health")
     async def health():
-        return {"status": "alive", "version": "2.0.0"}
+        status = "alive"
+        if _controller and _controller.memory.llm.ready:
+            status = "ready"
+        elif _controller and _controller.memory.llm.loading:
+            status = "loading"
+        return {"status": status, "version": "3.0.0"}
+
+    # -- System Metrics --
+
+    @app.get("/api/system/metrics")
+    async def system_metrics():
+        from ui.controls import _get_system_metrics
+        return _get_system_metrics()
 
     # -- Chat API --
 
@@ -81,7 +107,7 @@ def create_app(controller=None, ws_server=None, trainer=None) -> FastAPI:
     async def api_chat(req: ChatRequest):
         if not _controller:
             return {"error": "not_initialized"}
-        return _controller.chat_turn(req.text)
+        return await asyncio.to_thread(_controller.chat_turn, req.text)
 
     # -- Search API --
 
@@ -97,7 +123,7 @@ def create_app(controller=None, ws_server=None, trainer=None) -> FastAPI:
     async def api_learn(req: LearnRequest):
         if not _controller:
             return {"error": "not_initialized"}
-        return _controller.learn_concept(req.concept)
+        return await asyncio.to_thread(_controller.learn_concept, req.concept)
 
     # -- Memory / Brain Status --
 
@@ -119,6 +145,20 @@ def create_app(controller=None, ws_server=None, trainer=None) -> FastAPI:
     async def training_status():
         if not _trainer:
             return {"error": "not_initialized"}
+        return _trainer.status()
+
+    @app.post("/api/training/start")
+    async def training_start():
+        if not _trainer:
+            return {"error": "not_initialized"}
+        await _trainer.start()
+        return _trainer.status()
+
+    @app.post("/api/training/stop")
+    async def training_stop():
+        if not _trainer:
+            return {"error": "not_initialized"}
+        await _trainer.stop()
         return _trainer.status()
 
     @app.post("/api/training/cycle")
@@ -147,7 +187,7 @@ def create_app(controller=None, ws_server=None, trainer=None) -> FastAPI:
     async def consolidate():
         if not _controller:
             return {"error": "not_initialized"}
-        return _controller.consolidate()
+        return await asyncio.to_thread(_controller.consolidate)
 
     # -- Self-play --
 
@@ -155,6 +195,88 @@ def create_app(controller=None, ws_server=None, trainer=None) -> FastAPI:
     async def self_play():
         if not _controller:
             return {"error": "not_initialized"}
-        return _controller.self_play()
+        return await asyncio.to_thread(_controller.self_play)
+
+    # -- Knowledge Base (data upload) --
+
+    @app.get("/knowledge")
+    async def knowledge_page():
+        return FileResponse("ui/static/knowledge.html")
+
+    @app.post("/api/knowledge/upload")
+    async def knowledge_upload(
+        file: UploadFile = File(...),
+        tags: str = "",
+        concept_hint: str = "",
+    ):
+        if not _controller or not _controller.ingestion:
+            return {"error": "not_initialized"}
+
+        data = await file.read()
+        fname = file.filename or "upload"
+        tag_list = [t.strip() for t in tags.split(",") if t.strip()]
+        ext = fname.rsplit(".", 1)[-1].lower() if "." in fname else ""
+
+        if ext == "pdf":
+            result = await _controller.ingestion.ingest_pdf(
+                data, fname, tag_list)
+        elif ext in {"jpg", "jpeg", "png", "webp", "gif", "bmp"}:
+            result = await _controller.ingestion.ingest_image(
+                data, fname, concept_hint, tag_list)
+        elif ext in {"txt", "md", "rst", "csv", "html", "htm", "json", "docx", "doc"}:
+            result = await _controller.ingestion.ingest_text(
+                data, fname, tag_list)
+        else:
+            result = await _controller.ingestion.ingest_text(
+                data, fname, tag_list)
+
+        return {
+            "source": result.source,
+            "source_type": result.source_type,
+            "chunks_total": result.chunks_total,
+            "chunks_stored": result.chunks_stored,
+            "chunks_rejected": result.chunks_rejected,
+            "images_stored": result.images_stored,
+            "concepts_created": result.concepts_created,
+            "duration_s": round(result.duration_s, 2),
+            "success": result.success,
+            "error": result.error,
+        }
+
+    @app.get("/api/knowledge/history")
+    async def knowledge_history():
+        if not _controller or not _controller.ingestion:
+            return []
+        return _controller.ingestion.history
+
+    @app.post("/api/knowledge/url")
+    async def knowledge_url(req: KnowledgeUrlRequest):
+        if not _controller or not _controller.ingestion:
+            return {"error": "not_initialized"}
+        result = await _controller.ingestion.ingest_url(req.url, req.tags)
+        return {
+            "source": result.source,
+            "source_type": result.source_type,
+            "chunks_total": result.chunks_total,
+            "chunks_stored": result.chunks_stored,
+            "chunks_rejected": result.chunks_rejected,
+            "images_stored": result.images_stored,
+            "concepts_created": result.concepts_created,
+            "duration_s": round(result.duration_s, 2),
+            "success": result.success,
+            "error": result.error,
+        }
+
+    @app.post("/api/cleanup")
+    async def cleanup_garbage():
+        if not _controller:
+            return {"error": "not_initialized"}
+        return await asyncio.to_thread(_controller.memory.cleanup_garbage)
+
+    @app.get("/api/benchmark")
+    async def run_benchmark():
+        if not _trainer:
+            return {"error": "not_initialized"}
+        return await asyncio.to_thread(_trainer.run_benchmark)
 
     return app

@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LQNN v3 -- Quantum Brain</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;700&display=swap');
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: 'JetBrains Mono', monospace;
+      background: #0a0a0a;
+      color: #00ff41;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    body::after {
+      content: '';
+      position: fixed;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      pointer-events: none;
+      background: repeating-linear-gradient(
+        0deg, transparent, transparent 2px,
+        rgba(0,0,0,0.03) 2px, rgba(0,0,0,0.03) 4px
+      );
+      z-index: 9999;
+    }
+
+    .container {
+      text-align: center;
+      max-width: 500px;
+    }
+
+    .logo {
+      font-size: 28px;
+      font-weight: 700;
+      letter-spacing: 4px;
+      text-shadow: 0 0 20px rgba(0,255,65,0.4), 0 0 40px rgba(0,255,65,0.15);
+      margin-bottom: 12px;
+    }
+
+    .subtitle {
+      font-size: 12px;
+      color: #0088aa;
+      letter-spacing: 3px;
+      margin-bottom: 40px;
+    }
+
+    .status {
+      font-size: 14px;
+      color: #c8c8c8;
+      margin-bottom: 24px;
+    }
+
+    .spinner {
+      display: inline-block;
+      width: 24px;
+      height: 24px;
+      border: 2px solid #004d15;
+      border-top-color: #00ff41;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin-bottom: 20px;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    .progress-bar {
+      width: 300px;
+      height: 3px;
+      background: #1a1a1a;
+      border-radius: 2px;
+      margin: 0 auto 16px;
+      overflow: hidden;
+    }
+
+    .progress-fill {
+      height: 100%;
+      width: 30%;
+      background: linear-gradient(90deg, #004d15, #00aa2a, #00ff41);
+      animation: progress-pulse 2s ease-in-out infinite;
+    }
+
+    @keyframes progress-pulse {
+      0%, 100% { width: 20%; opacity: 0.6; }
+      50% { width: 80%; opacity: 1; }
+    }
+
+    .hint {
+      font-size: 10px;
+      color: #555;
+      margin-top: 12px;
+    }
+
+    .error {
+      color: #ff3333;
+      font-size: 12px;
+      margin-top: 8px;
+      display: none;
+    }
+
+    .url-config {
+      margin-top: 20px;
+      font-size: 10px;
+      color: #666;
+    }
+
+    .url-config input {
+      background: #0f1a0f;
+      border: 1px solid #004d15;
+      color: #00ff41;
+      font-family: inherit;
+      font-size: 11px;
+      padding: 4px 8px;
+      width: 200px;
+      outline: none;
+      border-radius: 2px;
+    }
+
+    .url-config input:focus {
+      border-color: #00aa2a;
+      box-shadow: 0 0 8px rgba(0,255,65,0.15);
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="logo">LQNN v3</div>
+    <div class="subtitle">QUANTUM ASSOCIATIVE BRAIN</div>
+    <div class="spinner"></div>
+    <div class="status" id="status">Connecting to backend...</div>
+    <div class="progress-bar"><div class="progress-fill"></div></div>
+    <div class="error" id="error"></div>
+    <div class="hint" id="hint">Ensure the LQNN Docker container is running</div>
+    <div class="url-config">
+      <label>Backend: </label>
+      <input type="text" id="backend-url" value="http://localhost:8000" />
+    </div>
+  </div>
+
+  <script>
+    const statusEl = document.getElementById('status');
+    const errorEl = document.getElementById('error');
+    const hintEl = document.getElementById('hint');
+    const urlInput = document.getElementById('backend-url');
+
+    let attempts = 0;
+    const MAX_ATTEMPTS = 300; // ~5 minutes at 1s intervals
+
+    async function checkBackend() {
+      const baseUrl = urlInput.value.replace(/\/+$/, '');
+      attempts++;
+
+      try {
+        const resp = await fetch(`${baseUrl}/health`, {
+          signal: AbortSignal.timeout(3000)
+        });
+        const data = await resp.json();
+
+        if (data.status === 'ready') {
+          statusEl.textContent = 'Brain online! Loading terminal...';
+          hintEl.textContent = '';
+          window.location.href = `${baseUrl}/terminal`;
+          return;
+        } else if (data.status === 'loading') {
+          statusEl.textContent = 'Models loading... please wait';
+          hintEl.textContent = 'LLM is downloading/loading (may take a few minutes on first run)';
+        } else {
+          statusEl.textContent = 'Backend starting...';
+        }
+
+        errorEl.style.display = 'none';
+      } catch (e) {
+        if (attempts <= 3) {
+          statusEl.textContent = 'Waiting for backend...';
+        } else {
+          statusEl.textContent = `Connecting... (attempt ${attempts})`;
+          errorEl.textContent = `Cannot reach ${baseUrl}/health`;
+          errorEl.style.display = 'block';
+        }
+      }
+
+      if (attempts < MAX_ATTEMPTS) {
+        setTimeout(checkBackend, 1000);
+      } else {
+        statusEl.textContent = 'Connection timeout';
+        errorEl.textContent = 'Could not connect to the LQNN backend. Please check if Docker is running.';
+        errorEl.style.display = 'block';
+      }
+    }
+
+    urlInput.addEventListener('change', () => {
+      attempts = 0;
+      errorEl.style.display = 'none';
+      statusEl.textContent = 'Reconnecting...';
+      checkBackend();
+    });
+
+    checkBackend();
+  </script>
+</body>
+</html>

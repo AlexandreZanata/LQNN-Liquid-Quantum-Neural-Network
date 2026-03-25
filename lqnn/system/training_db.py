@@ -45,7 +45,7 @@ class TrainingDB:
             self._available = False
 
     def _ensure_indexes(self) -> None:
-        if not self._db:
+        if self._db is None:
             return
         self._db["training_cycles"].create_index("timestamp")
         self._db["training_cycles"].create_index("cycle")

@@ -1,16 +1,15 @@
-"""LQNN v2 -- Main entry point.
+"""LQNN v3 -- Main entry point.
 
 Starts:
-1. The AI models (CLIP + Phi-3.5)
+1. The AI models (CLIP + Qwen2.5-7B)
 2. ChromaDB vector store
 3. MongoDB logging
 4. Continuous training loop (background)
-5. FastAPI web UI (foreground)
+5. FastAPI web UI with hacker terminal (foreground)
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import sys
@@ -27,7 +26,7 @@ log = logging.getLogger("lqnn")
 
 def build_system():
     """Initialize all system components."""
-    log.info("=== LQNN v2 - Quantum Associative Brain ===")
+    log.info("=== LQNN v3 - Quantum Associative Brain ===")
     log.info("Initializing system components...")
 
     from lqnn.core.vector_store import VectorStore
@@ -65,6 +64,10 @@ def build_system():
     log.info("Setting up chat engine...")
     chat_engine = ChatEngine(memory=memory, llm=llm, training_db=training_db)
 
+    import asyncio
+    reactive_queue: asyncio.Queue = asyncio.Queue(maxsize=50)
+    chat_engine.set_learning_queue(reactive_queue)
+
     log.info("Setting up continuous trainer...")
     trainer = ContinuousTrainer(
         memory=memory,
@@ -79,8 +82,21 @@ def build_system():
         trainer=trainer,
         agent_manager=agent_manager,
     )
+    controller.reactive_queue = reactive_queue
 
     ws_server = WebSocketStateServer(controller)
+
+    trainer.set_event_callback(ws_server.push_event)
+    agent_manager.set_event_callback(ws_server.push_event)
+
+    log.info("Setting up knowledge ingestion pipeline...")
+    from lqnn.ingestion.processor import KnowledgeIngestionPipeline
+    ingestion = KnowledgeIngestionPipeline(
+        memory=memory,
+        event_callback=ws_server.push_event,
+    )
+    controller.set_ingestion_pipeline(ingestion)
+
     app = create_app(controller=controller, ws_server=ws_server, trainer=trainer)
 
     log.info("System initialized. Starting server...")

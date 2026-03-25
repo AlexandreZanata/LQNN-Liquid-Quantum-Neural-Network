@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LQNN v3 - Quantum Brain Terminal</title>
+  <link rel="stylesheet" href="/static/terminal.css" />
+</head>
+<body>
+  <div class="terminal-layout">
+    <header class="status-bar">
+      <span class="logo">LQNN v3 QUANTUM BRAIN</span>
+      <span id="status-indicator" class="status-pill offline">OFFLINE</span>
+      <a href="/knowledge" class="nav-link">KNOWLEDGE BASE</a>
+      <span class="sys-metric" id="sys-cpu">CPU: --%</span>
+      <span class="sys-metric" id="sys-gpu">GPU: --/--GB</span>
+      <span class="sys-metric" id="sys-ram">RAM: --/--GB</span>
+      <span class="sys-metric" id="sys-phase">PHASE: --</span>
+      <span class="sys-metric" id="sys-uptime">UP: --</span>
+    </header>
+
+    <div class="panels">
+      <!-- LEFT COLUMN -->
+      <div class="panel-column left-col">
+        <!-- CHAT PANEL -->
+        <div class="panel chat-panel">
+          <div class="panel-header">
+            <span class="panel-title">CHAT</span>
+            <span class="panel-badge" id="badge-llm">LLM: --</span>
+          </div>
+          <div class="panel-body" id="chat-output"></div>
+          <div class="chat-input-row">
+            <span class="prompt-prefix">user@lqnn:~$</span>
+            <input type="text" id="chat-input" placeholder="Ask the quantum brain..." autocomplete="off" spellcheck="false" />
+          </div>
+        </div>
+
+        <!-- TRAINING LOG PANEL -->
+        <div class="panel train-panel">
+          <div class="panel-header">
+            <span class="panel-title">TRAINING LOG</span>
+            <span class="panel-badge" id="badge-cycle">cycle: 0</span>
+            <button class="action-btn" id="btn-start-train" title="Start Training">START</button>
+            <button class="action-btn danger" id="btn-stop-train" title="Stop Training">STOP</button>
+          </div>
+          <div class="panel-body log-body" id="training-log"></div>
+        </div>
+      </div>
+
+      <!-- RIGHT COLUMN -->
+      <div class="panel-column right-col">
+        <!-- BRAIN STATUS PANEL -->
+        <div class="panel brain-panel">
+          <div class="panel-header">
+            <span class="panel-title">BRAIN STATUS</span>
+          </div>
+          <div class="panel-body stats-body">
+            <div class="stat-row"><span class="stat-label">Concepts:</span><span class="stat-value" id="st-concepts">--</span></div>
+            <div class="stat-row"><span class="stat-label">Associations:</span><span class="stat-value" id="st-assoc">--</span></div>
+            <div class="stat-row"><span class="stat-label">Learned:</span><span class="stat-value" id="st-learned">--</span></div>
+            <div class="stat-row"><span class="stat-label">Queries:</span><span class="stat-value" id="st-queries">--</span></div>
+            <div class="stat-row"><span class="stat-label">CLIP:</span><span class="stat-value" id="st-clip">--</span></div>
+            <div class="stat-row"><span class="stat-label">LLM:</span><span class="stat-value" id="st-llm">--</span></div>
+            <div class="stat-row"><span class="stat-label">Training:</span><span class="stat-value" id="st-training">--</span></div>
+            <div class="stat-divider"></div>
+            <div class="action-row">
+              <button class="action-btn" id="btn-consolidate">CONSOLIDATE</button>
+              <button class="action-btn" id="btn-self-play">SELF-PLAY</button>
+              <button class="action-btn" id="btn-learn">LEARN</button>
+              <button class="action-btn" id="btn-search">SEARCH</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- AGENT ACTIVITY PANEL -->
+        <div class="panel agent-panel">
+          <div class="panel-header">
+            <span class="panel-title">AGENT ACTIVITY</span>
+            <span class="panel-badge" id="badge-agent">agents: --</span>
+          </div>
+          <div class="panel-body log-body" id="agent-log"></div>
+        </div>
+
+        <!-- RECENT CONCEPTS PANEL -->
+        <div class="panel concepts-panel">
+          <div class="panel-header">
+            <span class="panel-title">MEMORY MAP</span>
+            <span class="panel-badge" id="badge-concepts">0 concepts</span>
+          </div>
+          <div class="panel-body" id="concepts-list"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script src="/static/terminal.js"></script>
+</body>
+</html>

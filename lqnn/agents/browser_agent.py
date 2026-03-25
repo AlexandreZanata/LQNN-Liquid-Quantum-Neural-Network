@@ -105,11 +105,31 @@ class BrowserAgent:
 
             soup = BeautifulSoup(html, "html.parser")
 
-            for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
+            for tag in soup(["script", "style", "nav", "footer", "header",
+                             "aside", "form", "button", "select", "noscript",
+                             "iframe", "svg", "input", "textarea"]):
                 tag.decompose()
 
-            text = soup.get_text(separator="\n", strip=True)
-            text = re.sub(r"\n{3,}", "\n\n", text)[:10000]
+            main_content = (
+                soup.find("article")
+                or soup.find("main")
+                or soup.find(attrs={"role": "main"})
+                or soup.find("div", class_=re.compile(r"content|article|post|entry", re.I))
+                or soup
+            )
+
+            raw_text = main_content.get_text(separator="\n", strip=True)
+
+            lines = []
+            for line in raw_text.split("\n"):
+                line = line.strip()
+                if len(line) < 25:
+                    continue
+                alpha_count = sum(c.isalpha() or c.isspace() for c in line)
+                if alpha_count / max(len(line), 1) < 0.6:
+                    continue
+                lines.append(line)
+            text = "\n".join(lines)[:10000]
 
             links = []
             for a in soup.find_all("a", href=True):

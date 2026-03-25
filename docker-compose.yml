@@ -4,12 +4,14 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: lqnn-brain
+    runtime: nvidia
     environment:
       - CUDA_VISIBLE_DEVICES=0
       - MONGO_URI=mongodb://mongo:27017/lqnn
       - MONGO_DB=lqnn
       - HF_HOME=/app/models/cache
       - TORCH_HOME=/app/models/cache
+      - AUTO_TRAIN_ON_START=1
     ports:
       - "8000:8000"
     volumes:
@@ -17,7 +19,8 @@ services:
       - ./logs:/app/logs
       - model-cache:/app/models/cache
     depends_on:
-      - mongo
+      mongo:
+        condition: service_started
     deploy:
       resources:
         reservations:
@@ -25,6 +28,12 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
     restart: unless-stopped
 
   mongo:

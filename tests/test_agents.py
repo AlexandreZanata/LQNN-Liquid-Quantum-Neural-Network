@@ -72,15 +72,19 @@ class TestBrowserAgent:
 class TestAgentManager:
 
     def test_detect_gaps_empty_memory(self, memory):
+        from lqnn.training.continuous_trainer import TrainingPhase
         manager = AgentManager(memory=memory)
+        manager.set_phase(TrainingPhase.VISUAL_OBJECTS)
         gaps = manager.detect_knowledge_gaps()
 
         assert len(gaps) > 0
         assert isinstance(gaps[0], KnowledgeGap)
 
     def test_detect_gaps_seeded_memory(self, memory):
+        from lqnn.training.continuous_trainer import TrainingPhase
         memory.learn_concept("technology", source="test")
         manager = AgentManager(memory=memory)
+        manager.set_phase(TrainingPhase.ABSTRACT_CONCEPTS)
         gaps = manager.detect_knowledge_gaps()
 
         assert isinstance(gaps, list)

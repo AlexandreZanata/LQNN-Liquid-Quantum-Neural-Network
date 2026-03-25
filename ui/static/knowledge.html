@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LQNN v3 - Knowledge Base</title>
+  <link rel="stylesheet" href="/static/terminal.css" />
+  <link rel="stylesheet" href="/static/knowledge.css" />
+</head>
+<body>
+  <div class="terminal-layout">
+    <header class="status-bar">
+      <span class="logo">LQNN v3 KNOWLEDGE BASE</span>
+      <span id="status-indicator" class="status-pill offline">OFFLINE</span>
+      <a href="/terminal" class="nav-link">&larr; TERMINAL</a>
+      <span class="sys-metric" id="kb-concepts">CONCEPTS: --</span>
+      <span class="sys-metric" id="kb-queue">QUEUE: 0</span>
+      <span class="sys-metric" id="sys-cpu">CPU: --%</span>
+      <span class="sys-metric" id="sys-ram">RAM: --/-- GB</span>
+      <span class="sys-metric" id="sys-gpu">GPU: --</span>
+    </header>
+
+    <div class="kb-layout">
+
+      <!-- LEFT: Upload Panel -->
+      <div class="kb-left">
+
+        <!-- File Upload -->
+        <div class="panel">
+          <div class="panel-header">
+            <span class="panel-title">UPLOAD FILES</span>
+            <span class="panel-badge">PDF &middot; TXT &middot; MD &middot; DOCX &middot; HTML &middot; JSON &middot; JPG &middot; PNG &middot; WEBP</span>
+          </div>
+          <div class="panel-body upload-body">
+            <div class="drop-zone" id="drop-zone">
+              <div class="drop-icon">&uarr;</div>
+              <div class="drop-text">DROP FILES HERE (up to 50MB)</div>
+              <div class="drop-sub">or click to browse</div>
+              <input type="file" id="file-input" multiple
+                accept=".pdf,.txt,.md,.rst,.jpg,.jpeg,.png,.webp,.gif,.bmp,.csv,.docx,.doc,.html,.htm,.json"
+                style="display:none" />
+            </div>
+
+            <div class="upload-options">
+              <div class="opt-row">
+                <label class="opt-label">TAGS</label>
+                <input type="text" id="upload-tags" class="kb-input"
+                  placeholder="science, physics, 2024 (comma separated)" />
+              </div>
+              <div class="opt-row">
+                <label class="opt-label">CONCEPT HINT</label>
+                <input type="text" id="upload-concept" class="kb-input"
+                  placeholder="For images: what is this? (optional)" />
+              </div>
+            </div>
+
+            <div class="queue-list" id="upload-queue"></div>
+
+            <div class="action-row" style="padding-top:8px">
+              <button class="action-btn" id="btn-upload-all">INGEST ALL</button>
+              <button class="action-btn danger" id="btn-clear-queue">CLEAR</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- URL Ingestion -->
+        <div class="panel">
+          <div class="panel-header">
+            <span class="panel-title">INGEST URL</span>
+            <span class="panel-badge">articles &middot; papers &middot; blogs</span>
+          </div>
+          <div class="panel-body">
+            <div class="opt-row">
+              <label class="opt-label">URL</label>
+              <input type="text" id="url-input" class="kb-input"
+                placeholder="https://arxiv.org/abs/..." />
+            </div>
+            <div class="opt-row">
+              <label class="opt-label">TAGS</label>
+              <input type="text" id="url-tags" class="kb-input"
+                placeholder="research, quantum, ml" />
+            </div>
+            <div class="action-row" style="padding-top:8px">
+              <button class="action-btn" id="btn-ingest-url">FETCH & INGEST</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Knowledge Library -->
+        <div class="panel" style="flex:1">
+          <div class="panel-header">
+            <span class="panel-title">KNOWLEDGE LIBRARY</span>
+            <span class="panel-badge" id="badge-library-count">0 files</span>
+          </div>
+          <div class="panel-body library-body" id="kb-library-list"></div>
+        </div>
+
+      </div>
+
+      <!-- RIGHT: Activity + Stats -->
+      <div class="kb-right">
+
+        <!-- Progress / Activity Log -->
+        <div class="panel" style="flex:2">
+          <div class="panel-header">
+            <span class="panel-title">INGESTION LOG</span>
+            <span class="panel-badge" id="badge-ingested">0 ingested</span>
+            <button class="action-btn" id="btn-clear-log" style="margin-left:auto">CLEAR</button>
+          </div>
+          <div class="panel-body log-body" id="kb-log"></div>
+        </div>
+
+        <!-- Stats -->
+        <div class="panel" style="flex:0 0 auto">
+          <div class="panel-header">
+            <span class="panel-title">SESSION STATS</span>
+          </div>
+          <div class="panel-body stats-body">
+            <div class="stat-row">
+              <span class="stat-label">Files processed:</span>
+              <span class="stat-value" id="stat-files">0</span>
+            </div>
+            <div class="stat-row">
+              <span class="stat-label">URLs processed:</span>
+              <span class="stat-value" id="stat-urls">0</span>
+            </div>
+            <div class="stat-row">
+              <span class="stat-label">Chunks stored:</span>
+              <span class="stat-value" id="stat-chunks">0</span>
+            </div>
+            <div class="stat-row">
+              <span class="stat-label">Images stored:</span>
+              <span class="stat-value" id="stat-images">0</span>
+            </div>
+            <div class="stat-row">
+              <span class="stat-label">Concepts created:</span>
+              <span class="stat-value" id="stat-concepts">0</span>
+            </div>
+            <div class="stat-row">
+              <span class="stat-label">Rejected:</span>
+              <span class="stat-value warn" id="stat-rejected">0</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Recent Concepts from KB -->
+        <div class="panel" style="flex:1">
+          <div class="panel-header">
+            <span class="panel-title">RECENT KB CONCEPTS</span>
+          </div>
+          <div class="panel-body" id="kb-concepts-list"></div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/knowledge.js"></script>
+</body>
+</html>

@@ -29,3 +29,4 @@ class TestLLMEngine:
     def test_initial_state(self):
         llm = LLMEngine()
         assert llm.ready is False
+        assert llm.loading is False

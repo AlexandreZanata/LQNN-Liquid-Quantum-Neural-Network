@@ -1,10 +1,11 @@
-"""Auto-download OpenCLIP and Phi-3.5-mini on first run."""
+"""Auto-download OpenCLIP and Qwen2.5-7B on first run."""
 
 from __future__ import annotations
 
 import logging
 import os
 from pathlib import Path
+from typing import Any
 
 import torch
 
@@ -13,9 +14,11 @@ log = logging.getLogger(__name__)
 CLIP_MODEL_NAME = "ViT-B-32"
 CLIP_PRETRAINED = "laion2b_s34b_b79k"
 
-LLM_MODEL_ID = "microsoft/Phi-3.5-mini-instruct"
+LLM_MODEL_ID = "Qwen/Qwen2.5-7B-Instruct"
 
 CACHE_DIR = Path(os.environ.get("HF_HOME", "models/cache"))
+
+QWEN_CACHE_DIR = CACHE_DIR / "models--Qwen--Qwen2.5-7B-Instruct"
 
 
 def _device() -> str:
@@ -42,7 +45,7 @@ def ensure_clip_model() -> tuple:
 
 
 def ensure_llm_model() -> tuple:
-    """Download and return (model, tokenizer) for Phi-3.5-mini with 4-bit quant."""
+    """Download and return (model, tokenizer) for Qwen2.5-7B with 4-bit quant."""
     from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
     log.info("Loading %s (4-bit) ...", LLM_MODEL_ID)
@@ -74,3 +77,45 @@ def ensure_llm_model() -> tuple:
 
     log.info("LLM ready on %s (4-bit=%s)", device, device == "cuda")
     return model, tokenizer
+
+
+def llm_cache_status() -> dict[str, Any]:
+    """Return a quick local-cache status for Qwen2.5 files."""
+    snapshots_root = QWEN_CACHE_DIR / "snapshots"
+    if not snapshots_root.exists():
+        return {
+            "cached": False,
+            "reason": "no_cache_dir",
+            "snapshot": "",
+            "size_gb": 0.0,
+            "shards": 0,
+        }
+
+    snapshots = [p for p in snapshots_root.iterdir() if p.is_dir()]
+    if not snapshots:
+        return {
+            "cached": False,
+            "reason": "no_snapshots",
+            "snapshot": "",
+            "size_gb": 0.0,
+            "shards": 0,
+        }
+
+    latest = max(snapshots, key=lambda p: p.stat().st_mtime)
+    shard_files = list(latest.glob("*.safetensors"))
+    has_index = (latest / "model.safetensors.index.json").exists()
+    has_core = (
+        (latest / "config.json").exists()
+        and (latest / "tokenizer_config.json").exists()
+    )
+    total_bytes = sum(f.stat().st_size for f in latest.rglob("*") if f.is_file())
+    size_gb = round(total_bytes / (1024 ** 3), 2)
+    cached = has_core and (has_index or len(shard_files) > 0)
+
+    return {
+        "cached": cached,
+        "reason": "ok" if cached else "partial_files",
+        "snapshot": latest.name,
+        "size_gb": size_gb,
+        "shards": len(shard_files),
+    }
