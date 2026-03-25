@@ -123,6 +123,13 @@ def build_system():
     trainer.set_event_callback(ws_server.push_event)
     agent_manager.set_event_callback(ws_server.push_event)
 
+    log.info("Setting up language trainer...")
+    from lqnn.training.language_trainer import LanguageTrainer
+    from ui.websocket_server import set_language_trainer
+    language_trainer = LanguageTrainer(memory=memory)
+    language_trainer.set_event_callback(ws_server.push_event)
+    set_language_trainer(language_trainer)
+
     log.info("Setting up knowledge ingestion pipeline...")
     from lqnn.ingestion.processor import KnowledgeIngestionPipeline
     from lqnn.ingestion.rabbit_queue import RabbitIngestionQueue

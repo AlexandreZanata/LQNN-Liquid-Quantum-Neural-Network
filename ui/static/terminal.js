@@ -89,18 +89,51 @@ function handleMessage(data) {
 }
 
 function handleLiveEvent(ev) {
-  addAgentEntry(ev);
+  const resolved = { ...ev, type: ev.event_type || ev.type };
+  addAgentEntry(resolved);
 }
 
 // -- REASONING + STREAMING --
+// The reasoning block and streaming body live INSIDE a single wrapper div
+// (streamingDiv) so each Q&A is fully self-contained and no orphan
+// reasoning blocks leak between messages.
+
+function cleanupPreviousStream() {
+  if (reasoningDiv) {
+    reasoningDiv.classList.add("reasoning-complete");
+    reasoningDiv = null;
+  }
+  if (streamingDiv) {
+    const body = streamingDiv.querySelector(".streaming-cursor");
+    if (body) body.classList.remove("streaming-cursor");
+    streamingDiv = null;
+    streamingText = "";
+  }
+}
+
+function _ensureStreamingDiv() {
+  if (streamingDiv) return;
+  const output = document.getElementById("chat-output");
+  streamingDiv = document.createElement("div");
+  streamingDiv.className = "chat-msg assistant";
+
+  const header = document.createElement("div");
+  header.className = "msg-header";
+  header.innerHTML =
+    `<span class="msg-avatar assistant-avatar">$</span>` +
+    `<span class="msg-timestamp">${nowTimestamp()}</span>`;
+  streamingDiv.appendChild(header);
+
+  output.appendChild(streamingDiv);
+  streamingText = "";
+}
 
 function handleReasoning(step) {
-  const output = document.getElementById("chat-output");
+  _ensureStreamingDiv();
 
   if (!reasoningDiv) {
     reasoningDiv = document.createElement("div");
     reasoningDiv.className = "reasoning-block";
-    reasoningDiv.id = "active-reasoning";
 
     const header = document.createElement("div");
     header.className = "reasoning-header";
@@ -109,51 +142,40 @@ function handleReasoning(step) {
 
     const steps = document.createElement("div");
     steps.className = "reasoning-steps";
-    steps.id = "reasoning-steps";
+    reasoningDiv._stepsEl = steps;
     reasoningDiv.appendChild(steps);
 
-    output.appendChild(reasoningDiv);
+    streamingDiv.appendChild(reasoningDiv);
   }
 
-  const stepsContainer = document.getElementById("reasoning-steps");
-  if (stepsContainer) {
+  const stepsEl = reasoningDiv._stepsEl;
+  if (stepsEl) {
     const stepEl = document.createElement("div");
     stepEl.className = "reasoning-step";
     stepEl.textContent = step;
-    stepsContainer.appendChild(stepEl);
+    stepsEl.appendChild(stepEl);
   }
 
+  const output = document.getElementById("chat-output");
   output.scrollTop = output.scrollHeight;
 }
 
 function handleStreamToken(token) {
-  if (reasoningDiv) {
+  if (reasoningDiv && !reasoningDiv.classList.contains("reasoning-complete")) {
     reasoningDiv.classList.add("reasoning-complete");
   }
 
-  if (!streamingDiv) {
-    const output = document.getElementById("chat-output");
-    streamingDiv = document.createElement("div");
-    streamingDiv.className = "chat-msg assistant";
+  _ensureStreamingDiv();
 
-    const header = document.createElement("div");
-    header.className = "msg-header";
-    header.innerHTML =
-      `<span class="msg-avatar assistant-avatar">$</span>` +
-      `<span class="msg-timestamp">${nowTimestamp()}</span>`;
-    streamingDiv.appendChild(header);
-
+  if (!streamingDiv._bodyEl) {
     const body = document.createElement("div");
     body.className = "msg-body streaming-cursor";
-    body.id = "streaming-body";
+    streamingDiv._bodyEl = body;
     streamingDiv.appendChild(body);
-
-    output.appendChild(streamingDiv);
-    streamingText = "";
   }
 
   streamingText += token;
-  const body = document.getElementById("streaming-body");
+  const body = streamingDiv._bodyEl;
   if (body) {
     renderRichContent(body, streamingText);
   }
@@ -169,18 +191,11 @@ function finalizeStream(data) {
   }
 
   if (streamingDiv) {
-    const body = document.getElementById("streaming-body");
+    const body = streamingDiv._bodyEl;
     if (body) {
       body.classList.remove("streaming-cursor");
       const fullText = data.response || streamingText;
       renderRichContent(body, fullText);
-
-      const copyBtn = document.createElement("button");
-      copyBtn.className = "msg-copy-btn";
-      copyBtn.textContent = "COPY";
-      copyBtn.addEventListener("click", () => copyFullResponse(fullText, copyBtn));
-      const header = streamingDiv.querySelector(".msg-header");
-      if (header) header.appendChild(copyBtn);
     }
 
     if (data.confidence !== undefined || data.concepts) {
@@ -194,9 +209,13 @@ function finalizeStream(data) {
       streamingDiv.appendChild(metaDiv);
     }
 
+    const fullText = data.response || streamingText;
+    const footer = buildMsgFooter(fullText);
+    streamingDiv.appendChild(footer);
+
     currentMessages.push({
       role: "assistant",
-      text: data.response || streamingText,
+      text: fullText,
       meta: { confidence: data.confidence, concepts: data.concepts, duration_ms: data.duration_ms },
       timestamp: Date.now(),
     });
@@ -207,6 +226,19 @@ function finalizeStream(data) {
   } else {
     appendChat("assistant", data.response, data);
   }
+}
+
+function buildMsgFooter(text) {
+  const footer = document.createElement("div");
+  footer.className = "msg-footer";
+
+  const copyBtn = document.createElement("button");
+  copyBtn.className = "msg-copy-btn-footer";
+  copyBtn.innerHTML = '<span class="copy-icon">⧉</span> Copy';
+  copyBtn.addEventListener("click", () => copyFullResponse(text, copyBtn));
+  footer.appendChild(copyBtn);
+
+  return footer;
 }
 
 // -- STATS UPDATE --
@@ -434,12 +466,6 @@ function appendChat(role, text, meta = null, persist = true) {
     header.innerHTML =
       `<span class="msg-avatar assistant-avatar">$</span>` +
       `<span class="msg-timestamp">${nowTimestamp()}</span>`;
-
-    const copyBtn = document.createElement("button");
-    copyBtn.className = "msg-copy-btn";
-    copyBtn.textContent = "COPY";
-    copyBtn.addEventListener("click", () => copyFullResponse(text, copyBtn));
-    header.appendChild(copyBtn);
   }
 
   div.appendChild(header);
@@ -466,6 +492,10 @@ function appendChat(role, text, meta = null, persist = true) {
       parts.push(`${meta.duration_ms}ms`);
     metaDiv.textContent = parts.join(" | ");
     div.appendChild(metaDiv);
+  }
+
+  if (role === "assistant") {
+    div.appendChild(buildMsgFooter(text));
   }
 
   output.appendChild(div);
@@ -603,14 +633,14 @@ async function copyCode(code, button) {
 }
 
 async function copyFullResponse(text, button) {
+  const original = button.innerHTML;
   try {
     await navigator.clipboard.writeText(text);
-    const old = button.textContent;
-    button.textContent = "COPIED";
-    setTimeout(() => { button.textContent = old; }, 1200);
+    button.innerHTML = '<span class="copy-icon">✓</span> Copied';
+    setTimeout(() => { button.innerHTML = original; }, 1500);
   } catch (_) {
-    button.textContent = "FAILED";
-    setTimeout(() => { button.textContent = "COPY"; }, 1200);
+    button.textContent = "Failed";
+    setTimeout(() => { button.innerHTML = original; }, 1500);
   }
 }
 
@@ -696,6 +726,9 @@ async function openSession(sessionId) {
   const data = await resp.json();
   currentSessionId = sessionId;
   currentMessages = Array.isArray(data.messages) ? data.messages : [];
+  reasoningDiv = null;
+  streamingDiv = null;
+  streamingText = "";
   const output = document.getElementById("chat-output");
   output.innerHTML = "";
   for (const msg of currentMessages) {
@@ -840,6 +873,7 @@ document.getElementById("chat-input").addEventListener("keydown", (e) => {
     const text = input.value.trim();
     if (!text) return;
     if (!currentSessionId) return;
+    cleanupPreviousStream();
     appendChat("user", text);
     sendAction("chat_stream", { text });
     input.value = "";

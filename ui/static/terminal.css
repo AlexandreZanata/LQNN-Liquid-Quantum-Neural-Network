@@ -321,6 +321,20 @@ body {
   letter-spacing: 0.5px !important;
 }
 
+.lang-btn {
+  text-decoration: none;
+  background: rgba(0, 136, 170, 0.12);
+  border-color: var(--cyan-dim);
+  color: var(--cyan-dim);
+}
+
+.lang-btn:hover {
+  background: rgba(0, 212, 255, 0.15);
+  color: var(--cyan);
+  border-color: var(--cyan);
+  text-shadow: 0 0 6px rgba(0, 212, 255, 0.4);
+}
+
 /* CHAT MESSAGES */
 .chat-msg {
   margin-bottom: 6px;
@@ -375,6 +389,39 @@ body {
 .msg-copy-btn:hover {
   color: var(--green);
   border-color: var(--green-dark);
+}
+
+.msg-footer {
+  display: flex;
+  justify-content: flex-end;
+  padding: 4px 18px 2px;
+  gap: 8px;
+}
+
+.msg-copy-btn-footer {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 9px;
+  padding: 3px 10px;
+  cursor: pointer;
+  border-radius: 3px;
+  transition: all 0.2s;
+  letter-spacing: 0.5px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.msg-copy-btn-footer:hover {
+  color: var(--green);
+  border-color: var(--green-dim);
+  background: rgba(0, 255, 65, 0.05);
+}
+
+.msg-copy-btn-footer .copy-icon {
+  font-size: 11px;
 }
 
 .msg-body {
@@ -485,9 +532,15 @@ body {
 }
 
 .reasoning-block.reasoning-complete {
-  opacity: 0.5;
-  max-height: 60px;
+  opacity: 0.4;
+  max-height: 40px;
   overflow: hidden;
+  cursor: pointer;
+}
+
+.reasoning-block.reasoning-complete:hover {
+  opacity: 0.7;
+  max-height: none;
 }
 
 .reasoning-header {

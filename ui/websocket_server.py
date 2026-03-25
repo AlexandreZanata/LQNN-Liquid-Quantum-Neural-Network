@@ -13,6 +13,13 @@ from ui.controls import UIController
 
 log = logging.getLogger(__name__)
 
+_language_trainer = None
+
+
+def set_language_trainer(trainer) -> None:
+    global _language_trainer
+    _language_trainer = trainer
+
 
 class WebSocketStateServer:
     """Pushes brain state + live events to connected UI clients."""
@@ -77,8 +84,10 @@ class WebSocketStateServer:
                 event = await asyncio.wait_for(
                     self._event_queue.get(), timeout=1.0)
                 if self._clients:
+                    inner_type = event.pop("type", "unknown")
                     await self._broadcast_to_all({
                         "type": "live_event",
+                        "event_type": inner_type,
                         **event,
                     })
             except asyncio.TimeoutError:
@@ -218,6 +227,37 @@ class WebSocketStateServer:
             elif action == "get_state":
                 snapshot = self.controller.snapshot()
                 await ws.send_json(snapshot)
+
+            elif action == "get_language_status":
+                if _language_trainer:
+                    status = _language_trainer.status()
+                    await ws.send_json({"type": "language_status", **status})
+                else:
+                    await ws.send_json({"type": "language_status", "languages": {}})
+
+            elif action == "start_language_training":
+                if not _language_trainer:
+                    await ws.send_json({"type": "error", "message": "language trainer not initialized"})
+                else:
+                    langs = data.get("languages")
+                    await _language_trainer.start(langs)
+                    await ws.send_json({"type": "language_training_started", "languages": langs})
+
+            elif action == "stop_language_training":
+                if not _language_trainer:
+                    await ws.send_json({"type": "error", "message": "language trainer not initialized"})
+                else:
+                    langs = data.get("languages")
+                    await _language_trainer.stop(langs)
+                    await ws.send_json({"type": "language_training_stopped", "languages": langs})
+
+            elif action == "download_dataset":
+                if not _language_trainer:
+                    await ws.send_json({"type": "error", "message": "language trainer not initialized"})
+                else:
+                    dataset_id = data.get("dataset_id", "")
+                    result = await _language_trainer.download_dataset_manual(dataset_id)
+                    await ws.send_json({"type": "dataset_download_result", **result})
 
             else:
                 await ws.send_json({"type": "error", "message": f"Unknown action: {action}"})

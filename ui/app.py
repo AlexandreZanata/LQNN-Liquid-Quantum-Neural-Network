@@ -257,6 +257,17 @@ def create_app(controller=None, ws_server=None, trainer=None) -> FastAPI:
     async def knowledge_page():
         return FileResponse("ui/static/knowledge.html")
 
+    @app.get("/languages")
+    async def languages_page():
+        return FileResponse("ui/static/languages.html")
+
+    @app.get("/api/languages/status")
+    async def language_status():
+        from ui.websocket_server import _language_trainer
+        if not _language_trainer:
+            return {"error": "not_initialized"}
+        return _language_trainer.status()
+
     @app.post("/api/knowledge/upload")
     async def knowledge_upload(
         file: UploadFile = File(...),

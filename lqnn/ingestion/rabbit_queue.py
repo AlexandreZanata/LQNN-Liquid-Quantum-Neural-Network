@@ -33,7 +33,8 @@ class RabbitIngestionQueue:
         self._channel = await self._connection.channel()
         await self._channel.set_qos(prefetch_count=1)
         self._queue = await self._channel.declare_queue(QUEUE_NAME, durable=True)
-        self._consumer_tag = await self._queue.consume(self._on_message, no_ack=False)
+        self._consumer_tag = await self._queue.consume(
+            self._on_message, no_ack=False)
         log.info("Rabbit ingestion queue ready: %s", QUEUE_NAME)
 
     async def stop(self) -> None:
@@ -99,9 +100,13 @@ class RabbitIngestionQueue:
         )
 
     async def _on_message(self, message: aio_pika.IncomingMessage) -> None:
-        async with message.process(requeue=True):
+        payload: dict = {}
+        source = "unknown"
+        try:
             payload = json.loads(message.body.decode("utf-8"))
             kind = payload.get("kind")
+            source = payload.get("filename", payload.get("url", "unknown"))
+            log.info("Processing ingestion job: %s [%s]", kind, source)
 
             if kind == "file":
                 await self._consume_file(payload)
@@ -109,6 +114,23 @@ class RabbitIngestionQueue:
                 await self._consume_url(payload)
             else:
                 log.warning("Unknown ingestion job kind: %s", kind)
+
+            await message.ack()
+            log.info("Ingestion job completed: %s [%s]", kind, source)
+
+        except Exception as exc:
+            log.error("Ingestion job FAILED for %s: %s",
+                      source, exc, exc_info=True)
+            self._emit({
+                "type": "kb_error",
+                "source": source,
+                "error": str(exc)[:200],
+                "timestamp": time.time(),
+            })
+            try:
+                await message.reject(requeue=False)
+            except Exception:
+                pass
 
     async def _consume_file(self, payload: dict) -> None:
         path = payload.get("file_path", "")
@@ -120,14 +142,23 @@ class RabbitIngestionQueue:
             raise RuntimeError(f"Queued file missing: {path}")
 
         data = Path(path).read_bytes()
+        log.info("Ingesting file: %s (%d bytes)", filename, len(data))
         ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
 
         if ext == "pdf":
-            await self.ingestion.ingest_pdf(data, filename, tags)
+            result = await self.ingestion.ingest_pdf(data, filename, tags)
         elif ext in {"jpg", "jpeg", "png", "webp", "gif", "bmp"}:
-            await self.ingestion.ingest_image(data, filename, concept_hint, tags)
+            result = await self.ingestion.ingest_image(data, filename, concept_hint, tags)
+        elif ext in {"html", "htm"}:
+            result = await self.ingestion.ingest_text(data, filename, tags)
+        elif ext in {"docx", "doc"}:
+            result = await self.ingestion.ingest_text(data, filename, tags)
         else:
-            await self.ingestion.ingest_text(data, filename, tags)
+            result = await self.ingestion.ingest_text(data, filename, tags)
+
+        log.info("Ingestion result for %s: stored=%d rejected=%d images=%d error=%s",
+                 filename, result.chunks_stored, result.chunks_rejected,
+                 result.images_stored, result.error or "none")
 
         try:
             os.remove(path)
@@ -139,4 +170,7 @@ class RabbitIngestionQueue:
         tags = payload.get("tags", [])
         if not url:
             raise RuntimeError("Queued url job missing URL")
-        await self.ingestion.ingest_url(url, tags)
+        log.info("Ingesting URL: %s", url)
+        result = await self.ingestion.ingest_url(url, tags)
+        log.info("URL ingestion result for %s: stored=%d error=%s",
+                 url[:60], result.chunks_stored, result.error or "none")

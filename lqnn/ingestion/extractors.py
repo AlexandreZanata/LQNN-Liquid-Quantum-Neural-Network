@@ -33,8 +33,20 @@ class ExtractedContent:
     error: str = ""
 
 
+def _clean_page_text(text: str) -> str:
+    """Clean raw PDF page text: remove hyphenation artefacts, normalize whitespace."""
+    text = re.sub(r"-\n(\w)", r"\1", text)
+    text = re.sub(r"(?<!\n)\n(?!\n)", " ", text)
+    text = re.sub(r"[ \t]{3,}", "  ", text)
+    return text.strip()
+
+
 def extract_pdf(data: bytes, filename: str = "document.pdf") -> ExtractedContent:
-    """Extract text and images from a PDF, page-by-page for large files."""
+    """Extract text and images from a PDF, page-by-page for large files.
+
+    Uses pdfplumber (preferred) or pypdf as fallback. Applies per-page
+    text cleaning to de-hyphenate and merge wrapped lines.
+    """
     if len(data) > MAX_PDF_BYTES:
         return ExtractedContent(
             error=f"PDF too large ({len(data) / 1024 / 1024:.1f}MB > 50MB limit)",
@@ -50,10 +62,13 @@ def extract_pdf(data: bytes, filename: str = "document.pdf") -> ExtractedContent
         import pdfplumber
         with pdfplumber.open(io.BytesIO(data)) as pdf:
             meta["pages"] = len(pdf.pages)
+            log.info("Extracting PDF %s (%d pages, %.1f MB)",
+                     filename, len(pdf.pages), len(data) / 1024 / 1024)
             for i, page in enumerate(pdf.pages):
                 page_text = page.extract_text() or ""
-                if page_text.strip():
-                    text_parts.append(f"[Page {i+1}]\n{page_text}")
+                cleaned = _clean_page_text(page_text)
+                if len(cleaned) > 20:
+                    text_parts.append(f"[Page {i+1}] {filename}\n{cleaned}")
 
                 try:
                     for img_obj in page.images:
@@ -64,6 +79,8 @@ def extract_pdf(data: bytes, filename: str = "document.pdf") -> ExtractedContent
                     pass
 
         if text_parts:
+            log.info("pdfplumber extracted %d pages of text, %d images from %s",
+                     len(text_parts), len(images), filename)
             return ExtractedContent(
                 text="\n\n".join(text_parts),
                 images=images,
@@ -73,16 +90,18 @@ def extract_pdf(data: bytes, filename: str = "document.pdf") -> ExtractedContent
     except ImportError:
         log.debug("pdfplumber not available, trying pypdf")
     except Exception as e:
-        log.warning("pdfplumber failed: %s", e)
+        log.warning("pdfplumber failed for %s: %s", filename, e)
 
     try:
         import pypdf
         reader = pypdf.PdfReader(io.BytesIO(data))
         meta["pages"] = len(reader.pages)
+        log.info("pypdf extracting %d pages from %s", len(reader.pages), filename)
         for i, page in enumerate(reader.pages):
             page_text = page.extract_text() or ""
-            if page_text.strip():
-                text_parts.append(f"[Page {i+1}]\n{page_text}")
+            cleaned = _clean_page_text(page_text)
+            if len(cleaned) > 20:
+                text_parts.append(f"[Page {i+1}] {filename}\n{cleaned}")
 
         for page in reader.pages:
             if hasattr(page, "images"):
@@ -93,6 +112,8 @@ def extract_pdf(data: bytes, filename: str = "document.pdf") -> ExtractedContent
                     except Exception:
                         pass
 
+        log.info("pypdf extracted %d pages of text, %d images from %s",
+                 len(text_parts), len(images), filename)
         return ExtractedContent(
             text="\n\n".join(text_parts),
             images=images,
@@ -102,7 +123,7 @@ def extract_pdf(data: bytes, filename: str = "document.pdf") -> ExtractedContent
     except ImportError:
         log.warning("Neither pdfplumber nor pypdf installed.")
     except Exception as e:
-        log.error("PDF extraction failed: %s", e)
+        log.error("PDF extraction failed for %s: %s", filename, e)
 
     return ExtractedContent(
         error="No PDF library available. Install pdfplumber.",

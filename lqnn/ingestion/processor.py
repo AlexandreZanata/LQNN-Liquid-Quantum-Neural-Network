@@ -71,6 +71,7 @@ class KnowledgeIngestionPipeline:
         self.memory = memory
         self._emit = event_callback or (lambda e: None)
         self._history: list[dict] = self._load_history()
+        self._ingested_hashes: set[str] = self._build_hash_index()
 
     def _load_history(self) -> list[dict]:
         import json, os
@@ -83,6 +84,15 @@ class KnowledgeIngestionPipeline:
             pass
         return []
 
+    def _build_hash_index(self) -> set[str]:
+        """Build a set of content hashes from successful ingestions."""
+        hashes = set()
+        for entry in self._history:
+            h = entry.get("content_hash")
+            if h and entry.get("success"):
+                hashes.add(h)
+        return hashes
+
     def _save_history(self) -> None:
         import json, os
         try:
@@ -92,7 +102,32 @@ class KnowledgeIngestionPipeline:
         except Exception as e:
             log.debug("Failed to save ingestion history: %s", e)
 
-    def _record_result(self, result: IngestionResult) -> None:
+    def _record_result(self, result: IngestionResult,
+                       content_hash: str = "") -> None:
+        existing = next(
+            (e for e in self._history
+             if e.get("source") == result.source and e.get("success")),
+            None,
+        )
+        if existing and result.success:
+            existing["chunks_stored"] = result.chunks_stored
+            existing["chunks_total"] = result.chunks_total
+            existing["chunks_rejected"] = result.chunks_rejected
+            existing["images_stored"] = result.images_stored
+            existing["concepts_created"] = result.concepts_created
+            existing["duration_s"] = round(result.duration_s, 2)
+            existing["success"] = result.success
+            existing["error"] = result.error
+            existing["timestamp"] = result.timestamp
+            if content_hash:
+                existing["content_hash"] = content_hash
+            self._save_history()
+            return
+
+        if existing and not result.success:
+            self._save_history()
+            return
+
         entry = {
             "source": result.source,
             "source_type": result.source_type,
@@ -105,11 +140,19 @@ class KnowledgeIngestionPipeline:
             "success": result.success,
             "error": result.error,
             "timestamp": result.timestamp,
+            "content_hash": content_hash,
         }
         self._history.append(entry)
         if len(self._history) > 200:
             self._history = self._history[-200:]
         self._save_history()
+        if content_hash and result.success:
+            self._ingested_hashes.add(content_hash)
+
+    def is_already_ingested(self, data: bytes) -> str | None:
+        """Return the content hash if already successfully ingested, else None."""
+        h = hashlib.md5(data).hexdigest()
+        return h if h in self._ingested_hashes else None
 
     @property
     def history(self) -> list[dict]:
@@ -123,6 +166,27 @@ class KnowledgeIngestionPipeline:
                          tags: list[str] | None = None) -> IngestionResult:
         """Ingest a PDF file (papers, books, articles)."""
         t0 = time.time()
+        content_hash = hashlib.md5(data).hexdigest()
+
+        if content_hash in self._ingested_hashes:
+            log.info("Skipping already-ingested file: %s", filename)
+            existing = next(
+                (e for e in self._history
+                 if e.get("content_hash") == content_hash and e.get("success")),
+                None,
+            )
+            result = IngestionResult(
+                source=filename, source_type="pdf",
+                chunks_stored=existing.get("chunks_stored", 0) if existing else 0,
+                chunks_total=existing.get("chunks_total", 0) if existing else 0,
+                concepts_created=existing.get("concepts_created", 0) if existing else 0,
+                images_stored=existing.get("images_stored", 0) if existing else 0,
+                duration_s=time.time() - t0,
+                error="already_ingested",
+            )
+            self._emit_done(result)
+            return result
+
         self._emit_progress("pdf", filename, "extracting", 0)
 
         content = await asyncio.to_thread(extract_pdf, data, filename)
@@ -133,20 +197,31 @@ class KnowledgeIngestionPipeline:
         meta = {**content.metadata, "tags": ",".join(tags or []), "type": "pdf"}
         result = await self._process_text_content(content, "pdf", filename, meta, t0)
 
-        # Also process embedded images
         for i, img_bytes in enumerate(content.images):
             caption = content.image_captions[i] if i < len(content.image_captions) else filename
             await self._ingest_image_bytes(img_bytes, caption, filename, result)
 
         result.duration_s = time.time() - t0
         self._emit_done(result)
-        self._record_result(result)
+        self._record_result(result, content_hash)
         return result
 
     async def ingest_text(self, data: bytes, filename: str,
                           tags: list[str] | None = None) -> IngestionResult:
         """Ingest plain text or markdown file."""
         t0 = time.time()
+        content_hash = hashlib.md5(data).hexdigest()
+
+        if content_hash in self._ingested_hashes:
+            log.info("Skipping already-ingested file: %s", filename)
+            result = IngestionResult(
+                source=filename, source_type="text",
+                duration_s=time.time() - t0,
+                error="already_ingested",
+            )
+            self._emit_done(result)
+            return result
+
         self._emit_progress("text", filename, "extracting", 0)
 
         content = await asyncio.to_thread(extract_text, data, filename)
@@ -158,7 +233,7 @@ class KnowledgeIngestionPipeline:
         result = await self._process_text_content(content, "text", filename, meta, t0)
         result.duration_s = time.time() - t0
         self._emit_done(result)
-        self._record_result(result)
+        self._record_result(result, content_hash)
         return result
 
     async def ingest_image(self, data: bytes, filename: str,
@@ -166,6 +241,18 @@ class KnowledgeIngestionPipeline:
                            tags: list[str] | None = None) -> IngestionResult:
         """Ingest an image file directly into the visual memory."""
         t0 = time.time()
+        content_hash = hashlib.md5(data).hexdigest()
+
+        if content_hash in self._ingested_hashes:
+            log.info("Skipping already-ingested image: %s", filename)
+            result = IngestionResult(
+                source=filename, source_type="image",
+                duration_s=time.time() - t0,
+                error="already_ingested",
+            )
+            self._emit_done(result)
+            return result
+
         self._emit_progress("image", filename, "encoding", 0)
 
         content = await asyncio.to_thread(extract_image, data, filename)
@@ -178,7 +265,7 @@ class KnowledgeIngestionPipeline:
         await self._ingest_image_bytes(content.images[0], concept, filename, result)
         result.duration_s = time.time() - t0
         self._emit_done(result)
-        self._record_result(result)
+        self._record_result(result, content_hash)
         return result
 
     async def ingest_url(self, url: str,
@@ -214,20 +301,27 @@ class KnowledgeIngestionPipeline:
     ) -> IngestionResult:
         result = IngestionResult(source=source_name, source_type=source_type)
 
-        if not content.text.strip():
+        raw_text = content.text.strip()
+        if not raw_text:
             result.error = "No text content extracted"
             return result
 
+        cleaned = self._clean_extracted_text(raw_text)
+        log.info("Extracted %d chars from %s (cleaned to %d chars)",
+                 len(raw_text), source_name, len(cleaned))
+
         chunks = semantic_chunk(
-            text=content.text,
+            text=cleaned,
             source_type=source_type,
             source_name=source_name,
             metadata=meta,
         )
         result.chunks_total = len(chunks)
+        log.info("Split %s into %d chunks", source_name, len(chunks))
         self._emit_progress(source_type, source_name, "chunking", 5,
                             extra={"total_chunks": len(chunks)})
 
+        batch_size = 10
         for i, chunk in enumerate(chunks):
             ok = await asyncio.to_thread(self._store_chunk, chunk)
             if ok:
@@ -236,42 +330,72 @@ class KnowledgeIngestionPipeline:
             else:
                 result.chunks_rejected += 1
 
-            # Emit progress every 5 chunks
-            if i % 5 == 0:
-                pct = int((i / max(len(chunks), 1)) * 90) + 5
+            if (i + 1) % batch_size == 0 or i == len(chunks) - 1:
+                pct = int(((i + 1) / max(len(chunks), 1)) * 90) + 5
                 self._emit_progress(source_type, source_name, "encoding", pct,
                                     extra={"stored": result.chunks_stored,
-                                           "rejected": result.chunks_rejected})
-            # Yield control to avoid blocking the event loop
+                                           "rejected": result.chunks_rejected,
+                                           "processed": i + 1,
+                                           "total": len(chunks)})
+                log.info("  [%s] %d/%d chunks (stored=%d rejected=%d)",
+                         source_name[:30], i + 1, len(chunks),
+                         result.chunks_stored, result.chunks_rejected)
             await asyncio.sleep(0)
 
         return result
 
+    @staticmethod
+    def _clean_extracted_text(text: str) -> str:
+        """Remove noise common in PDFs: page headers/footers, excessive
+        whitespace, ligature artefacts, control characters."""
+        import re
+        import unicodedata
+        text = unicodedata.normalize("NFKD", text)
+        text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", text)
+        text = re.sub(r"\f", "\n\n", text)
+        text = re.sub(r"[ \t]{3,}", "  ", text)
+        text = re.sub(r"\n{4,}", "\n\n\n", text)
+        lines = text.split("\n")
+        cleaned_lines = []
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                cleaned_lines.append("")
+                continue
+            if len(stripped) < 5 and stripped.isdigit():
+                continue
+            cleaned_lines.append(line)
+        return "\n".join(cleaned_lines)
+
     def _store_chunk(self, chunk: TextChunk) -> bool:
-        """Encode a text chunk and store it in the quantum memory."""
+        """Encode a text chunk and store it in the quantum memory.
+
+        Uses CLIP-only encoding (fast, ~10ms) without triggering LLM association
+        generation. Associations are deferred to the background worker thread
+        so book ingestion doesn't take hours.
+        """
         text = chunk.text.strip()
         if len(text) < MIN_CHUNK_CHARS:
             return False
+        if len(text) > MAX_CHUNK_CHARS:
+            text = text[:MAX_CHUNK_CHARS]
 
-        # User-curated sources can include formulas/symbols; keep filter permissive.
-        alpha_ratio = sum(c.isalpha() or c.isspace() for c in text) / max(len(text), 1)
-        alnum_ratio = sum(c.isalnum() or c.isspace() for c in text) / max(len(text), 1)
-        if alpha_ratio < 0.20 and alnum_ratio < 0.35:
+        printable = sum(c.isprintable() for c in text) / max(len(text), 1)
+        if printable < 0.50:
             return False
 
         try:
-            # Encode with CLIP (text path)
-            vector = self.memory.clip.encode_text(text[:512])  # CLIP token limit
+            vector = self.memory._cached_encode_text(text[:512])
 
-            # Duplicate detection
-            results = self.memory.store.query_concepts(vector, n=1)
-            if results and results[0].get("distance", 1.0) < 0.08:
-                log.debug("Duplicate chunk skipped: %s...", text[:40])
-                return False
+            try:
+                results = self.memory.store.query_concepts(vector, n=1)
+                if results and results[0].get("distance", 1.0) < 0.08:
+                    log.debug("Duplicate chunk skipped: %s...", text[:40])
+                    return False
+            except Exception:
+                pass
 
-            # Build a short concept label from the first sentence
-            concept_label = text.split(".")[0][:80].strip() or text[:80]
-
+            concept_label = self._extract_concept_label(text)
             chunk_id = "kb_" + hashlib.md5(text.encode()).hexdigest()[:16]
 
             entry = VectorEntry(
@@ -290,8 +414,14 @@ class KnowledgeIngestionPipeline:
             )
             self.memory.store.add_concept(entry)
 
-            # Generate associations for richer quantum superposition
-            self.memory._generate_associations(concept_label, vector)
+            # Queue 5 associations for background generation instead of
+            # blocking with a full 30-association LLM call per chunk
+            import queue as _q
+            try:
+                self.memory._assoc_bg_queue.put_nowait(
+                    (concept_label, vector, 5))
+            except _q.Full:
+                pass
 
             self._emit({
                 "type": "kb_chunk_stored",
@@ -305,6 +435,16 @@ class KnowledgeIngestionPipeline:
         except Exception as e:
             log.warning("Failed to store chunk: %s", e)
             return False
+
+    @staticmethod
+    def _extract_concept_label(text: str) -> str:
+        """Build a meaningful concept label from the text."""
+        for sep in (".", ":", "\n"):
+            parts = text.split(sep, 1)
+            label = parts[0].strip()
+            if 10 < len(label) < 120:
+                return label
+        return text[:100].strip()
 
     async def _ingest_image_bytes(
         self,

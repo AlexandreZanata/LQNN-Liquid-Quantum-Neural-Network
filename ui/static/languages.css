@@ -1,0 +1,307 @@
+/* Language Training specific styles -- extends terminal.css */
+
+.lang-layout {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+  gap: 0;
+}
+
+.lang-left {
+  display: flex;
+  flex-direction: column;
+  flex: 1.2;
+  overflow: hidden;
+}
+
+.lang-right {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  overflow: hidden;
+}
+
+/* Language Cards Grid */
+.lang-grid-body {
+  padding: 8px;
+}
+
+.lang-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 6px;
+}
+
+.lang-card {
+  background: var(--bg-dark);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 10px 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+  position: relative;
+  overflow: hidden;
+}
+
+.lang-card:hover {
+  border-color: var(--border-glow);
+  background: #0c0c0c;
+}
+
+.lang-card.active {
+  border-color: var(--cyan-dim);
+  background: rgba(0, 212, 255, 0.04);
+}
+
+.lang-card.training {
+  border-color: var(--green-dim);
+  background: rgba(0, 255, 65, 0.03);
+}
+
+.lang-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.lang-card-flag {
+  font-size: 18px;
+  line-height: 1;
+}
+
+.lang-card-name {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-bright);
+  letter-spacing: 1px;
+  flex: 1;
+}
+
+.lang-card-code {
+  font-size: 9px;
+  color: var(--text-dim);
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+.lang-card-status {
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  padding: 1px 5px;
+  border-radius: 2px;
+}
+
+.lang-card-status.idle {
+  color: var(--text-dim);
+  background: rgba(102, 102, 102, 0.1);
+  border: 1px solid rgba(102, 102, 102, 0.2);
+}
+
+.lang-card-status.downloading {
+  color: var(--yellow);
+  background: rgba(255, 221, 0, 0.08);
+  border: 1px solid rgba(255, 221, 0, 0.2);
+}
+
+.lang-card-status.training {
+  color: var(--green);
+  background: rgba(0, 255, 65, 0.08);
+  border: 1px solid rgba(0, 255, 65, 0.2);
+  animation: statusPulse 2s ease-in-out infinite;
+}
+
+.lang-card-status.ready {
+  color: var(--cyan);
+  background: rgba(0, 212, 255, 0.08);
+  border: 1px solid rgba(0, 212, 255, 0.2);
+}
+
+@keyframes statusPulse {
+  0%, 100% { opacity: 0.7; }
+  50% { opacity: 1; }
+}
+
+.lang-card-stats {
+  display: flex;
+  justify-content: space-between;
+  font-size: 9px;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+
+.lang-card-stats span {
+  display: flex;
+  gap: 3px;
+}
+
+.lang-card-stats .val {
+  color: var(--green);
+  font-weight: 500;
+}
+
+.lang-card-bar {
+  width: 100%;
+  height: 3px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-bottom: 6px;
+}
+
+.lang-card-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--green-dark), var(--green-dim), var(--green));
+  transition: width 0.4s ease;
+  box-shadow: 0 0 4px rgba(0, 255, 65, 0.3);
+  border-radius: 2px;
+}
+
+.lang-card-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.lang-card-actions .action-btn {
+  flex: 1;
+  font-size: 8px;
+  padding: 2px 6px;
+  text-align: center;
+}
+
+/* Dataset list */
+.dataset-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow-y: auto;
+}
+
+.dataset-item {
+  display: flex;
+  flex-direction: column;
+  padding: 8px 10px;
+  background: var(--bg-dark);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  transition: border-color 0.15s;
+}
+
+.dataset-item:hover {
+  border-color: var(--border-glow);
+}
+
+.dataset-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dataset-name {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--cyan);
+  letter-spacing: 1px;
+  flex: 1;
+}
+
+.dataset-license {
+  font-size: 8px;
+  color: var(--text-dim);
+  letter-spacing: 0.5px;
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+}
+
+.dataset-size {
+  font-size: 9px;
+  color: var(--text-dim);
+}
+
+.dataset-desc {
+  font-size: 9px;
+  color: var(--text-dim);
+  margin-top: 4px;
+  line-height: 1.4;
+}
+
+.dataset-langs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  margin-top: 5px;
+}
+
+.dataset-lang-tag {
+  font-size: 8px;
+  padding: 1px 5px;
+  border-radius: 2px;
+  background: rgba(0, 212, 255, 0.06);
+  border: 1px solid rgba(0, 212, 255, 0.15);
+  color: var(--cyan-dim);
+  letter-spacing: 0.5px;
+}
+
+.dataset-actions {
+  margin-top: 6px;
+  display: flex;
+  gap: 4px;
+}
+
+/* Language Log types */
+.log-type.lang-download { color: var(--yellow); }
+.log-type.lang-parse { color: var(--cyan); }
+.log-type.lang-store { color: var(--green); }
+.log-type.lang-assoc { color: var(--magenta); }
+.log-type.lang-cycle { color: var(--green-dim); }
+.log-type.lang-error { color: var(--red); }
+.log-type.lang-start { color: var(--green); }
+.log-type.lang-stop { color: var(--red); }
+
+/* Language concept entries */
+.lang-concept-entry {
+  display: flex;
+  align-items: center;
+  padding: 3px 6px;
+  font-size: 9px;
+  border-bottom: 1px solid #0f0f0f;
+  gap: 6px;
+  border-left: 2px solid var(--border);
+}
+
+.lang-concept-entry:nth-child(even) {
+  background: var(--row-stripe);
+}
+
+.lang-concept-lang {
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: var(--cyan);
+  width: 22px;
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+
+.lang-concept-source {
+  color: var(--text-bright);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lang-concept-arrow {
+  color: var(--green-dim);
+  flex-shrink: 0;
+}
+
+.lang-concept-target {
+  color: var(--green);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

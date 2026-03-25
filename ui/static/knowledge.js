@@ -71,7 +71,8 @@ function handleMessage(data) {
 }
 
 function handleLiveEvent(ev) {
-  switch (ev.type) {
+  const etype = ev.event_type || ev.type;
+  switch (etype) {
     case "kb_progress":
       logEntry("progress",
         `[${ev.source_type?.toUpperCase()}] ${ev.source} — ${ev.stage} ${ev.percent}%` +
@@ -90,21 +91,25 @@ function handleLiveEvent(ev) {
       break;
 
     case "kb_done": {
-      const icon = ev.success ? "\u2713" : "\u2717";
-      const cls = ev.success ? "learn" : "error";
+      if (ev.error === "already_ingested") {
+        logEntry("sys", `⟳ ${ev.source} — already in library, skipped`);
+        markQueueItemDone(ev.source, true, null);
+        break;
+      }
+      const hasData = (ev.chunks_stored || 0) > 0 || (ev.images_stored || 0) > 0;
+      const icon = hasData ? "\u2713" : "\u2717";
+      const cls = hasData ? "learn" : "error";
       logEntry(cls,
-        `${icon} ${ev.source} — chunks=${ev.chunks_stored} images=${ev.images_stored} ` +
-        `concepts=${ev.concepts_created} (${ev.duration_s}s)` +
+        `${icon} ${ev.source} — chunks=${ev.chunks_stored}/${ev.chunks_total || "?"} ` +
+        `images=${ev.images_stored} concepts=${ev.concepts_created} (${ev.duration_s}s)` +
         (ev.error ? ` ERR: ${ev.error}` : "")
       );
-      if (!ev.error) {
-        stats.chunks += ev.chunks_stored || 0;
-        stats.images += ev.images_stored || 0;
-        stats.concepts += ev.concepts_created || 0;
-        stats.rejected += ev.chunks_rejected || 0;
-        if (ev.success) stats.ingested++;
-        updateStats();
-      }
+      stats.chunks += ev.chunks_stored || 0;
+      stats.images += ev.images_stored || 0;
+      stats.concepts += ev.concepts_created || 0;
+      stats.rejected += ev.chunks_rejected || 0;
+      if (hasData) stats.ingested++;
+      updateStats();
       addLibraryItem({
         source: ev.source,
         source_type: ev.source_type || "file",
@@ -112,14 +117,20 @@ function handleLiveEvent(ev) {
         chunks_total: ev.chunks_total || ev.chunks_stored || 0,
         images_stored: ev.images_stored || 0,
         concepts_created: ev.concepts_created || 0,
-        success: ev.success,
+        success: hasData,
         duration_s: ev.duration_s || 0,
+        error: ev.error || "",
       });
-      markQueueItemDone(ev.source, ev.success, ev.error);
+      markQueueItemDone(ev.source, hasData, ev.error);
       break;
     }
     case "kb_queued":
       logEntry("sys", `queued: ${ev.source}`);
+      break;
+
+    case "kb_error":
+      logEntry("error", `Ingestion error: ${ev.source} — ${ev.error || "unknown"}`);
+      markQueueItemDone(ev.source, false, ev.error);
       break;
   }
 }
@@ -318,7 +329,18 @@ function ingestUrl() {
 // ------------------------------------------------------------------ //
 
 function addLibraryItem(item) {
-  libraryItems.unshift(item);
+  if (item.error === "already_ingested") return;
+
+  const idx = libraryItems.findIndex(
+    (li) => li.source === item.source
+  );
+  if (idx >= 0) {
+    if (item.success || (item.chunks_stored || 0) >= (libraryItems[idx].chunks_stored || 0)) {
+      libraryItems[idx] = item;
+    }
+  } else {
+    libraryItems.unshift(item);
+  }
   if (libraryItems.length > 200) libraryItems = libraryItems.slice(0, 200);
   renderLibrary();
 }
@@ -362,8 +384,17 @@ async function loadLibraryHistory() {
     if (resp.ok) {
       const data = await resp.json();
       if (Array.isArray(data)) {
-        libraryItems = data;
+        const deduped = new Map();
+        for (const item of data) {
+          const key = item.source;
+          const existing = deduped.get(key);
+          if (!existing || item.success || (item.chunks_stored || 0) > (existing.chunks_stored || 0)) {
+            deduped.set(key, item);
+          }
+        }
+        libraryItems = [...deduped.values()].reverse();
         renderLibrary();
+        setText("badge-library-count", `${libraryItems.length} files`);
       }
     }
   } catch (e) {

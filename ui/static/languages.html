@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LQNN v3 - Language Training</title>
+  <link rel="stylesheet" href="/static/terminal.css" />
+  <link rel="stylesheet" href="/static/languages.css" />
+</head>
+<body>
+  <div class="terminal-layout">
+    <header class="status-bar">
+      <span class="logo">LQNN v3 LANGUAGE TRAINING</span>
+      <span id="status-indicator" class="status-pill offline">OFFLINE</span>
+      <a href="/terminal" class="nav-link">&larr; TERMINAL</a>
+      <a href="/knowledge" class="nav-link">KNOWLEDGE BASE</a>
+      <span class="sys-metric" id="lang-total-pairs">PAIRS: --</span>
+      <span class="sys-metric" id="lang-active">ACTIVE: --</span>
+      <span class="sys-metric" id="sys-cpu">CPU: --%</span>
+      <span class="sys-metric" id="sys-ram">RAM: --/-- GB</span>
+      <span class="sys-metric" id="sys-gpu">GPU: --</span>
+    </header>
+
+    <div class="lang-layout">
+
+      <!-- LEFT: Language Grid + Controls -->
+      <div class="lang-left">
+
+        <!-- Language Cards Grid -->
+        <div class="panel" style="flex:2">
+          <div class="panel-header">
+            <span class="panel-title">LANGUAGES</span>
+            <span class="panel-badge" id="badge-lang-count">0 active</span>
+            <button class="action-btn" id="btn-train-all" title="Start training all selected languages">TRAIN ALL</button>
+            <button class="action-btn danger" id="btn-stop-all" title="Stop all language training">STOP ALL</button>
+          </div>
+          <div class="panel-body lang-grid-body">
+            <div class="lang-grid" id="lang-grid"></div>
+          </div>
+        </div>
+
+        <!-- Dataset Manager -->
+        <div class="panel" style="flex:1">
+          <div class="panel-header">
+            <span class="panel-title">DATASETS</span>
+            <span class="panel-badge" id="badge-datasets">open source</span>
+          </div>
+          <div class="panel-body dataset-body" id="dataset-list"></div>
+        </div>
+
+      </div>
+
+      <!-- RIGHT: Training Log + Stats -->
+      <div class="lang-right">
+
+        <!-- Training Log -->
+        <div class="panel" style="flex:2">
+          <div class="panel-header">
+            <span class="panel-title">LANGUAGE TRAINING LOG</span>
+            <span class="panel-badge" id="badge-lang-events">0 events</span>
+            <button class="action-btn" id="btn-clear-lang-log" style="margin-left:auto">CLEAR</button>
+          </div>
+          <div class="panel-body log-body" id="lang-log"></div>
+        </div>
+
+        <!-- Per-Language Stats -->
+        <div class="panel" style="flex:0 0 auto">
+          <div class="panel-header">
+            <span class="panel-title">TRAINING STATS</span>
+          </div>
+          <div class="panel-body stats-body" id="lang-stats">
+            <div class="stat-row">
+              <span class="stat-label">Total pairs stored:</span>
+              <span class="stat-value" id="stat-total-pairs">0</span>
+            </div>
+            <div class="stat-row">
+              <span class="stat-label">Languages active:</span>
+              <span class="stat-value" id="stat-langs-active">0</span>
+            </div>
+            <div class="stat-row">
+              <span class="stat-label">Datasets downloaded:</span>
+              <span class="stat-value" id="stat-datasets-dl">0</span>
+            </div>
+            <div class="stat-row">
+              <span class="stat-label">Associations generated:</span>
+              <span class="stat-value" id="stat-assoc-gen">0</span>
+            </div>
+            <div class="stat-row">
+              <span class="stat-label">Training status:</span>
+              <span class="stat-value" id="stat-training-status">STOPPED</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Recent Language Concepts -->
+        <div class="panel" style="flex:1">
+          <div class="panel-header">
+            <span class="panel-title">RECENT LANGUAGE CONCEPTS</span>
+          </div>
+          <div class="panel-body" id="lang-concepts-list"></div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/languages.js"></script>
+</body>
+</html>
