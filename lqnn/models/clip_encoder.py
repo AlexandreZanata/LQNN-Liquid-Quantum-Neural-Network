@@ -25,8 +25,8 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 _EMBED_DIM = 512  # ViT-B/32 output dimension
-_HOT_CACHE_SIZE = 1000
-_PINNED_BATCH_SLOTS = 64  # pre-allocated pinned memory slots
+_HOT_CACHE_SIZE = 4000
+_PINNED_BATCH_SLOTS = 128  # pre-allocated pinned memory slots
 
 
 class _GPUHotCache:
@@ -203,6 +203,10 @@ class CLIPEncoder:
         if not uncached_texts:
             return results
 
+        use_pinned = (self._pinned_buffer is not None
+                      and self._transfer_stream is not None
+                      and self._compute_stream is not None)
+
         tokens = self._tokenizer(uncached_texts).to(self._device)
 
         if self._compute_stream:
@@ -214,7 +218,14 @@ class CLIPEncoder:
             feats = self._model.encode_text(tokens)
             feats = feats / feats.norm(dim=-1, keepdim=True)
 
-        feats_np = feats.cpu().numpy().astype(np.float32)
+        n_feats = feats.shape[0]
+        if use_pinned and n_feats <= self._pinned_buffer.shape[0]:
+            with torch.cuda.stream(self._transfer_stream):
+                self._pinned_buffer[:n_feats].copy_(feats, non_blocking=True)
+            self._transfer_stream.synchronize()
+            feats_np = self._pinned_buffer[:n_feats].numpy().copy()
+        else:
+            feats_np = feats.cpu().numpy().astype(np.float32)
 
         if self._hot_cache:
             for idx, orig_idx in enumerate(uncached_indices):

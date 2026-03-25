@@ -257,7 +257,9 @@ class UIController:
         else:
             model_runtime_state = "idle"
 
-        return build_brain_payload(
+        quantum_metrics = self._collect_quantum_metrics()
+
+        payload = build_brain_payload(
             memory_stats=self.memory.stats(),
             training_status=self.trainer.status(),
             agent_status=self.agent_manager.stats(),
@@ -267,3 +269,44 @@ class UIController:
             agent_activity=self.agent_manager.activity_log[-50:],
             system_metrics=_get_system_metrics(model_runtime_state),
         )
+        payload["quantum_engine"] = quantum_metrics
+        return payload
+
+    def _collect_quantum_metrics(self) -> dict[str, Any]:
+        """Collect metrics from the quantum processing subsystems."""
+        metrics: dict[str, Any] = {}
+
+        if hasattr(self.memory, '_hei') and self.memory._hei is not None:
+            try:
+                metrics["hei"] = self.memory._hei.stats()
+            except Exception:
+                metrics["hei"] = {"error": "unavailable"}
+        else:
+            metrics["hei"] = {"built": False}
+
+        if hasattr(self.memory, '_batch_engine') and self.memory._batch_engine is not None:
+            try:
+                metrics["batch_engine"] = self.memory._batch_engine.stats()
+            except Exception:
+                metrics["batch_engine"] = {"error": "unavailable"}
+        else:
+            metrics["batch_engine"] = {"status": "not_connected"}
+
+        recent_chats = self.chat_engine.chat_history[-10:]
+        if recent_chats:
+            context_sizes = [t.get("context_chars", 0) for t in recent_chats
+                             if "context_chars" in t]
+            coherence_counts = [t.get("coherence_passes", 0) for t in recent_chats
+                                if "coherence_passes" in t]
+            if context_sizes:
+                metrics["avg_context_chars"] = round(
+                    sum(context_sizes) / len(context_sizes))
+            if coherence_counts:
+                metrics["avg_coherence_passes"] = round(
+                    sum(coherence_counts) / len(coherence_counts), 1)
+
+        metrics["context_budget_chars"] = 8_000
+        metrics["max_output_tokens"] = 6000
+        metrics["coherence_pipeline_enabled"] = True
+
+        return metrics

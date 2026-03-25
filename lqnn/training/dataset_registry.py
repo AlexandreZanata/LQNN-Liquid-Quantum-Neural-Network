@@ -147,6 +147,9 @@ class JParaCrawlDataset(DatasetInfo):
 
     The official NTT site (kecl.ntt.co.jp) has SSL issues, so we use the
     curated HuggingFace mirror instead.
+
+    The actual file hosted is ``1m_filtered.tsv.gz`` (tab-separated, gzipped)
+    at the repo root -- NOT a parquet under ``data/``.
     """
 
     def __init__(self) -> None:
@@ -166,7 +169,7 @@ class JParaCrawlDataset(DatasetInfo):
     def url_for_pair(self, src: str, tgt: str) -> str | None:
         if tgt != "ja":
             return None
-        return f"{self.base_url}/data/train-00000-of-00001.parquet"
+        return f"{self.base_url}/1m_filtered.tsv.gz"
 
 
 REGISTRY: list[DatasetInfo] = [

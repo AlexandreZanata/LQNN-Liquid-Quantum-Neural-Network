@@ -8,6 +8,7 @@ import logging
 from typing import Any
 
 from fastapi import WebSocket, WebSocketDisconnect
+from starlette.websockets import WebSocketState
 
 from ui.controls import UIController
 
@@ -32,6 +33,7 @@ class WebSocketStateServer:
         self._task: asyncio.Task | None = None
         self._running = False
         self._event_queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=500)
+        self._active_stream_tasks: dict[WebSocket, asyncio.Task] = {}
 
     def push_event(self, event: dict) -> None:
         """Push a real-time event (training/agent) to all clients."""
@@ -131,39 +133,89 @@ class WebSocketStateServer:
 
             elif action == "chat_stream":
                 text = data.get("text", "")
-                loop = asyncio.get_event_loop()
-                msg_queue: asyncio.Queue[tuple[str, str] | None] = asyncio.Queue()
+                session_id = data.get("session_id", "")
 
-                def _on_token(chunk: str) -> None:
-                    loop.call_soon_threadsafe(
-                        msg_queue.put_nowait, ("token", chunk))
+                async def _run_stream() -> None:
+                    loop = asyncio.get_event_loop()
+                    msg_queue: asyncio.Queue[tuple[str, str] | None] = asyncio.Queue()
+                    ws_closed = False
 
-                def _on_reasoning(step: str) -> None:
-                    loop.call_soon_threadsafe(
-                        msg_queue.put_nowait, ("reasoning", step))
+                    def _on_token(chunk: str) -> None:
+                        nonlocal ws_closed
+                        if not ws_closed:
+                            loop.call_soon_threadsafe(
+                                msg_queue.put_nowait, ("token", chunk))
 
-                async def _send_messages() -> None:
-                    while True:
-                        item = await msg_queue.get()
-                        if item is None:
-                            break
-                        kind, val = item
+                    def _on_reasoning(step: str) -> None:
+                        nonlocal ws_closed
+                        if not ws_closed:
+                            loop.call_soon_threadsafe(
+                                msg_queue.put_nowait, ("reasoning", step))
+
+                    async def _send_messages() -> None:
+                        nonlocal ws_closed
+                        while True:
+                            item = await msg_queue.get()
+                            if item is None:
+                                break
+                            kind, val = item
+                            try:
+                                if ws.client_state != WebSocketState.CONNECTED:
+                                    ws_closed = True
+                                    break
+                                if kind == "token":
+                                    await ws.send_json(
+                                        {"type": "chat_token", "token": val})
+                                elif kind == "reasoning":
+                                    await ws.send_json(
+                                        {"type": "chat_reasoning", "step": val})
+                            except Exception:
+                                ws_closed = True
+                                break
+
+                    sender_task = asyncio.create_task(_send_messages())
+                    result = await asyncio.to_thread(
+                        self.controller.chat_engine.chat_stream,
+                        text, _on_token, _on_reasoning,
+                    )
+                    loop.call_soon_threadsafe(msg_queue.put_nowait, None)
+                    await sender_task
+
+                    self._persist_stream_result(session_id, text, result)
+
+                    is_cancelled = result.get("status") == "cancelled"
+
+                    if not ws_closed and ws.client_state == WebSocketState.CONNECTED:
                         try:
-                            if kind == "token":
-                                await ws.send_json({"type": "chat_token", "token": val})
-                            elif kind == "reasoning":
-                                await ws.send_json({"type": "chat_reasoning", "step": val})
+                            if is_cancelled:
+                                await ws.send_json({"type": "stream_cancelled"})
+                            else:
+                                await ws.send_json(
+                                    {"type": "chat_response", **result})
                         except Exception:
-                            break
+                            log.debug("WS closed before final response sent")
+                    else:
+                        log.info(
+                            "WS disconnected mid-stream; response saved "
+                            "to session %s",
+                            session_id[:12] if session_id else "(none)")
 
-                sender_task = asyncio.create_task(_send_messages())
-                result = await asyncio.to_thread(
-                    self.controller.chat_engine.chat_stream,
-                    text, _on_token, _on_reasoning,
-                )
-                loop.call_soon_threadsafe(msg_queue.put_nowait, None)
-                await sender_task
-                await ws.send_json({"type": "chat_response", **result})
+                    self._active_stream_tasks.pop(ws, None)
+
+                stream_task = asyncio.create_task(_run_stream())
+                self._active_stream_tasks[ws] = stream_task
+
+            elif action == "cancel_stream":
+                cancelled = self.controller.chat_engine.cancel_active()
+                task = self._active_stream_tasks.get(ws)
+                if task and not task.done():
+                    log.info("Stream cancel requested by client")
+                if not cancelled:
+                    try:
+                        if ws.client_state == WebSocketState.CONNECTED:
+                            await ws.send_json({"type": "stream_cancelled"})
+                    except Exception:
+                        pass
 
             elif action == "search":
                 result = await self.controller.search(data.get("query", ""))
@@ -224,6 +276,11 @@ class WebSocketStateServer:
                     self.controller.trainer.run_benchmark)
                 await ws.send_json({"type": "benchmark_result", **result})
 
+            elif action == "benchmark_frontier":
+                result = await asyncio.to_thread(
+                    self.controller.trainer.run_frontier_benchmark)
+                await ws.send_json({"type": "benchmark_frontier_result", **result})
+
             elif action == "get_state":
                 snapshot = self.controller.snapshot()
                 await ws.send_json(snapshot)
@@ -264,7 +321,53 @@ class WebSocketStateServer:
 
         except Exception as exc:
             log.error("WS action '%s' failed: %s", action, exc, exc_info=True)
-            await ws.send_json({"type": "error", "message": str(exc)})
+            try:
+                if ws.client_state == WebSocketState.CONNECTED:
+                    await ws.send_json({"type": "error", "message": str(exc)})
+            except Exception:
+                pass
+
+    def _persist_stream_result(self, session_id: str, user_text: str,
+                               result: dict) -> None:
+        """Save the assistant response to the session store server-side.
+
+        This ensures the response survives even if the WebSocket is closed
+        before the frontend can save it (e.g. user reloads mid-stream).
+        """
+        if not session_id:
+            return
+        try:
+            from ui.app import _chat_sessions
+            if not _chat_sessions:
+                return
+            sess = _chat_sessions.get_session(session_id)
+            if not sess:
+                return
+            messages = list(sess.get("messages", []))
+            import time
+            now_ms = int(time.time() * 1000)
+            has_user_msg = any(
+                m.get("role") == "user" and m.get("text") == user_text
+                for m in messages[-3:]
+            )
+            if not has_user_msg:
+                messages.append({
+                    "role": "user", "text": user_text,
+                    "meta": {}, "timestamp": now_ms,
+                })
+            messages.append({
+                "role": "assistant",
+                "text": result.get("response", ""),
+                "meta": {
+                    "confidence": result.get("confidence"),
+                    "concepts": result.get("concepts"),
+                    "duration_ms": result.get("duration_ms"),
+                },
+                "timestamp": now_ms,
+            })
+            _chat_sessions.upsert_session(session_id, messages=messages)
+        except Exception as exc:
+            log.warning("Failed to persist stream result: %s", exc)
 
     async def _broadcast_loop(self) -> None:
         while self._running:

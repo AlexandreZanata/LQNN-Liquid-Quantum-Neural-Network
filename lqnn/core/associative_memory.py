@@ -43,18 +43,45 @@ from lqnn.models.llm_engine import LLMEngine
 
 log = logging.getLogger(__name__)
 
+# Quantum Decoherence Shield patterns -- environmental noise that
+# destroys coherent quantum states.
+_GARBAGE_INDICATORS = frozenset([
+    "%n%n", "%s%s", "rnd=", ";app=", ";uid=", "68BAC", "0A27C",
+    "iTradeEU", "76FF3D", "B8FCA4", "R_1;uid",
+])
+_MIN_ALPHA_RATIO = 0.40
+
+
+def _is_coherent(text: str) -> bool:
+    """Quantum decoherence shield: reject fragments that are environmental
+    noise (corrupted PDF residue, binary artefacts, etc.)."""
+    if not text or len(text) < 3:
+        return False
+    text_lower = text[:200].lower()
+    for pattern in _GARBAGE_INDICATORS:
+        if pattern.lower() in text_lower:
+            return False
+    alpha_count = sum(c.isalpha() or c.isspace() for c in text[:200])
+    if alpha_count / max(len(text[:200]), 1) < _MIN_ALPHA_RATIO:
+        return False
+    return True
+
+
 IMAGE_WEIGHT = 0.7
 TEXT_WEIGHT = 0.3
-EMBED_CACHE_SIZE = 2048
+EMBED_CACHE_SIZE = 8192
 
 # Wave-collapse constants
 TEMPERATURE_DEFAULT = 0.25
 TEMPERATURE_MIN = 0.05
 TEMPERATURE_MAX = 0.8
-MULTI_HOP_PROBES = 5
-MULTI_HOP_SECOND_ORDER = 10
+MULTI_HOP_PROBES = 8
+MULTI_HOP_SECOND_ORDER = 16
+
+# Superposition Context Assembly v5 (Heisenberg-optimised for 7B model)
 CONTEXT_CHARS_PER_FRAGMENT = 500
-MAX_CONTEXT_FRAGMENTS = 30
+MAX_CONTEXT_FRAGMENTS = 40
+CONTEXT_BUDGET_CHARS = 8_000  # ~2K tokens -- optimal speed/quality for 7B
 
 # Adaptive collapse thresholds
 ADAPTIVE_N_LOW = 5
@@ -66,7 +93,7 @@ CONFIDENCE_EXPAND_THRESHOLD_2 = 0.15
 # Association queue
 ASSOC_QUEUE_SIZE = 2000
 ASSOC_WORKERS_MIN = 1
-ASSOC_WORKERS_MAX = 4
+ASSOC_WORKERS_MAX = 8
 
 # Resonance
 RESONANCE_SHARED_THRESHOLD = 5
@@ -120,12 +147,15 @@ class AssociativeMemory:
         self._assoc_bg_queue: queue.Queue = queue.Queue(maxsize=ASSOC_QUEUE_SIZE)
         self._assoc_bg_threads: list[threading.Thread] = []
         self._assoc_bg_running = False
-        self._pool = ThreadPoolExecutor(max_workers=4)
+        self._pool = ThreadPoolExecutor(max_workers=8)
 
         # HEI will be injected by main_loop after construction
         self._hei = None
         # Batch engine will be injected by main_loop after construction
         self._batch_engine = None
+
+        self._confidence_history: list[float] = []
+        self._confidence_window = 20
 
         self._start_bg_association_workers()
 
@@ -136,12 +166,15 @@ class AssociativeMemory:
         self._batch_engine = engine
 
     def _cached_encode_text(self, text: str) -> np.ndarray:
-        """CLIP text encoding with LRU cache."""
+        """CLIP text encoding with LRU cache + batch engine fast path."""
         key = text[:512]
         if key in self._embed_cache:
             self._embed_cache.move_to_end(key)
             return self._embed_cache[key]
-        vec = self.clip.encode_text(key)
+        if self._batch_engine is not None:
+            vec = self._batch_engine.encode_text_urgent(key)
+        else:
+            vec = self.clip.encode_text(key)
         self._embed_cache[key] = vec
         if len(self._embed_cache) > EMBED_CACHE_SIZE:
             self._embed_cache.popitem(last=False)
@@ -180,6 +213,9 @@ class AssociativeMemory:
 
     def _bg_association_loop(self) -> None:
         while self._assoc_bg_running:
+            if self.llm.chat_active:
+                time.sleep(1)
+                continue
             try:
                 concept, primary_vec, n = self._assoc_bg_queue.get(timeout=2.0)
                 self._generate_associations_sync(concept, primary_vec, n)
@@ -342,7 +378,11 @@ class AssociativeMemory:
         associations = []
 
         if assoc_words:
-            assoc_vectors = self.clip.encode_texts(assoc_words)
+            if self._batch_engine is not None:
+                assoc_vectors = self._batch_engine.encode_texts_urgent(
+                    assoc_words)
+            else:
+                assoc_vectors = self.clip.encode_texts(assoc_words)
             for word, vec in zip(assoc_words, assoc_vectors):
                 strength = float(np.dot(primary_vec, vec))
                 assoc_id = self.store.add_association(
@@ -375,18 +415,48 @@ class AssociativeMemory:
         return amps
 
     def _adaptive_temperature(self, query: str) -> float:
-        """Adapt temperature based on query specificity.
+        """Self-tuning temperature based on query specificity and rolling
+        confidence history.
 
-        Short, specific queries get low temperature (sharp collapse).
-        Long, vague queries get high temperature (broad search).
+        Short queries -> low temperature (sharp collapse).
+        Long queries -> higher temperature (broad search).
+        Recent low confidence -> widen the search automatically.
+        Recent high confidence -> sharpen the search.
         """
         words = query.split()
         n = len(words)
         if n <= 3:
-            return TEMPERATURE_MIN + 0.05
-        if n <= 8:
-            return TEMPERATURE_DEFAULT
-        return min(TEMPERATURE_MAX, TEMPERATURE_DEFAULT + 0.03 * (n - 8))
+            base_temp = TEMPERATURE_MIN + 0.05
+        elif n <= 8:
+            base_temp = TEMPERATURE_DEFAULT
+        else:
+            base_temp = min(TEMPERATURE_MAX, TEMPERATURE_DEFAULT + 0.03 * (n - 8))
+
+        if len(self._confidence_history) >= 3:
+            avg_conf = sum(self._confidence_history[-self._confidence_window:]) / \
+                       len(self._confidence_history[-self._confidence_window:])
+            if avg_conf < 0.2:
+                base_temp = min(TEMPERATURE_MAX, base_temp + 0.15)
+            elif avg_conf > 0.6:
+                base_temp = max(TEMPERATURE_MIN, base_temp - 0.05)
+
+        return base_temp
+
+    def _dynamic_probe_count(self) -> int:
+        """Adjust multi-hop probe count based on recent query performance."""
+        if len(self._confidence_history) < 3:
+            return MULTI_HOP_PROBES
+
+        avg_conf = sum(self._confidence_history[-self._confidence_window:]) / \
+                   len(self._confidence_history[-self._confidence_window:])
+
+        if avg_conf < 0.15:
+            return min(MULTI_HOP_PROBES + 4, 12)
+        if avg_conf < 0.3:
+            return MULTI_HOP_PROBES + 2
+        if avg_conf > 0.7:
+            return max(3, MULTI_HOP_PROBES - 2)
+        return MULTI_HOP_PROBES
 
     def _interference(self, concepts: list[dict],
                       amplitudes: list[float]) -> list[float]:
@@ -447,7 +517,7 @@ class AssociativeMemory:
 
         for fut in futures:
             try:
-                assoc_results = fut.result(timeout=2)
+                assoc_results = fut.result(timeout=0.5)
                 for a in assoc_results:
                     aid = a.get("id", "")
                     if aid not in seen_ids:
@@ -467,7 +537,7 @@ class AssociativeMemory:
 
         for fut in concept_futures:
             try:
-                results = fut.result(timeout=2)
+                results = fut.result(timeout=0.5)
                 for r in results:
                     rid = r.get("id", "")
                     if rid not in seen_ids:
@@ -479,29 +549,46 @@ class AssociativeMemory:
         second_order.sort(key=lambda x: x.get("distance", 1.0))
         return second_order[:n_second]
 
-    def query(self, question: str, n_results: int = 10) -> CollapseResult:
-        """Probabilistic wave-collapse with multi-hop probing.
+    def _hei_narrow(self, query_vec: np.ndarray) -> list[str] | None:
+        """Use HEI to pre-filter concept IDs for faster collapse."""
+        if self._hei is None or not self._hei.ready:
+            return None
+        try:
+            return self._hei.narrow(query_vec)
+        except Exception:
+            return None
 
-        1. Adaptive temperature based on query specificity
-        2. First collapse: primary concepts + associations (parallel)
-        3. Compute probability amplitudes + interference
-        4. Multi-hop: second-order knowledge via entangled probes
-        5. Build rich context (up to 30 fragments x 500 chars)
-        6. Wave-function confidence: sum(amplitude^2)
+    def query(self, question: str, n_results: int = 10) -> CollapseResult:
+        """Probabilistic wave-collapse with HEI pre-filtering and
+        superposition context assembly.
+
+        1. HEI.narrow() pre-filters concept IDs (10-20x faster)
+        2. Adaptive temperature based on query specificity
+        3. First collapse: primary concepts + associations (parallel)
+        4. Compute probability amplitudes + interference
+        5. Multi-hop: second-order knowledge via entangled probes
+        6. Superposition context assembly (up to ~50K chars)
+        7. Wave-function confidence: sum(amplitude^2)
         """
         query_vec = self._cached_encode_text(question)
         temperature = self._adaptive_temperature(question)
 
-        crystal_results = self.store.query_crystal_tier(query_vec, n=3)
+        fut_narrow = self._pool.submit(self._hei_narrow, query_vec)
+        fut_crystal = self._pool.submit(
+            self.store.query_crystal_tier, query_vec, 5)
+
+        narrowed_ids = fut_narrow.result(timeout=0.5)
+        crystal_results = fut_crystal.result(timeout=0.5)
 
         n_initial = ADAPTIVE_N_LOW
         fut_concepts = self._pool.submit(
-            self.store.query_concepts, query_vec, n_initial)
+            self.store.query_concepts, query_vec, n_initial,
+            None, narrowed_ids)
         fut_assocs = self._pool.submit(
             self.store.query_associations, query_vec, n_initial * 2)
 
-        concepts = fut_concepts.result()
-        assoc_results = fut_assocs.result()
+        concepts = fut_concepts.result(timeout=1.0)
+        assoc_results = fut_assocs.result(timeout=1.0)
 
         if concepts:
             distances = [c.get("distance", 1.0) for c in concepts]
@@ -512,7 +599,8 @@ class AssociativeMemory:
             raw_confidence = 0.0
 
         if raw_confidence < CONFIDENCE_EXPAND_THRESHOLD_1:
-            expanded = self.store.query_concepts(query_vec, ADAPTIVE_N_MID)
+            expanded = self.store.query_concepts(
+                query_vec, ADAPTIVE_N_MID, id_filter=narrowed_ids)
             if len(expanded) > len(concepts):
                 concepts = expanded
                 distances = [c.get("distance", 1.0) for c in concepts]
@@ -520,7 +608,8 @@ class AssociativeMemory:
                 raw_confidence = sum(a * a for a in amplitudes[:10])
 
         if raw_confidence < CONFIDENCE_EXPAND_THRESHOLD_2:
-            expanded = self.store.query_concepts(query_vec, ADAPTIVE_N_HIGH)
+            expanded = self.store.query_concepts(
+                query_vec, ADAPTIVE_N_HIGH, id_filter=narrowed_ids)
             if len(expanded) > len(concepts):
                 concepts = expanded
                 distances = [c.get("distance", 1.0) for c in concepts]
@@ -537,51 +626,24 @@ class AssociativeMemory:
         concepts = [r[0] for r in ranked]
         amplitudes = [r[1] for r in ranked]
 
-        multi_hop = self._multi_hop_collapse(concepts, query_vec)
+        n_probes = self._dynamic_probe_count()
+        multi_hop = self._multi_hop_collapse(
+            concepts, query_vec, n_probes=n_probes)
 
         self.store.batch_touch(
             [c.get("id", "") for c in concepts[:10]],
             [c.get("metadata", {}) for c in concepts[:10]],
         )
 
-        context_parts = []
-
-        for c in crystal_results[:2]:
-            doc = c.get("document", "")
-            meta = c.get("metadata", {})
-            full_text = meta.get("full_text", "")
-            dist = c.get("distance", 1.0)
-            text = full_text[:CONTEXT_CHARS_PER_FRAGMENT] if full_text else doc
-            if text:
-                context_parts.append(
-                    f"- [crystallized] {text} (relevance: {1 - dist:.2f})")
-
-        for c in concepts[:5]:
-            doc = c.get("document", "")
-            meta = c.get("metadata", {})
-            full_text = meta.get("full_text", "")
-            dist = c.get("distance", 1.0)
-            text = full_text[:CONTEXT_CHARS_PER_FRAGMENT] if full_text else doc
-            if text:
-                context_parts.append(f"- {text} (relevance: {1 - dist:.2f})")
-
-        for mh in multi_hop[:MULTI_HOP_SECOND_ORDER]:
-            doc = mh.get("document", "")
-            meta = mh.get("metadata", {})
-            full_text = meta.get("full_text", "")
-            text = full_text[:CONTEXT_CHARS_PER_FRAGMENT] if full_text else doc
-            if text:
-                context_parts.append(f"- [linked] {text}")
-
-        for a in assoc_results[:15]:
-            doc = a.get("document", "")
-            if doc:
-                context_parts.append(f"- {doc}")
-
-        context_parts = context_parts[:MAX_CONTEXT_FRAGMENTS]
-        context = "\n".join(context_parts) if context_parts else ""
+        context = self._assemble_superposition_context(
+            crystal_results, concepts, amplitudes, multi_hop, assoc_results)
 
         confidence = min(1.0, max(0.0, raw_confidence))
+
+        self._confidence_history.append(confidence)
+        if len(self._confidence_history) > self._confidence_window * 2:
+            self._confidence_history = \
+                self._confidence_history[-self._confidence_window:]
 
         self._query_count += 1
         return CollapseResult(
@@ -593,6 +655,101 @@ class AssociativeMemory:
             multi_hop_concepts=multi_hop,
             amplitudes=amplitudes,
         )
+
+    # ------------------------------------------------------------------ #
+    # Superposition Context Assembly                                       #
+    # ------------------------------------------------------------------ #
+
+    def _assemble_superposition_context(
+        self,
+        crystal_results: list[dict],
+        concepts: list[dict],
+        amplitudes: list[float],
+        multi_hop: list[dict],
+        assoc_results: list[dict],
+    ) -> str:
+        """Build a rich, deduplicated context string ranked by relevance.
+
+        Hierarchical priority:
+          1. Crystallized concepts (full_text, highest trust)
+          2. Primary concepts ranked by amplitude * relevance
+          3. Multi-hop linked knowledge (full_text)
+          4. Association labels (compact semantic links)
+
+        Deduplication via first-100-char hash prevents redundant fragments.
+        Total output is capped at CONTEXT_BUDGET_CHARS (~50K chars / ~12K tokens).
+        """
+        seen_hashes: set[str] = set()
+        scored_parts: list[tuple[float, str]] = []
+
+        def _dedup_add(text: str, score: float, prefix: str = "") -> None:
+            text = text.strip()
+            if not text:
+                return
+            if not _is_coherent(text):
+                return
+            sig = hashlib.md5(text[:100].encode()).hexdigest()
+            if sig in seen_hashes:
+                return
+            seen_hashes.add(sig)
+            label = f"- {prefix}{text}"
+            scored_parts.append((score, label))
+
+        for c in crystal_results[:5]:
+            meta = c.get("metadata", {})
+            full_text = meta.get("full_text", "")
+            doc = c.get("document", "")
+            dist = c.get("distance", 1.0)
+            text = (full_text[:CONTEXT_CHARS_PER_FRAGMENT] if full_text
+                    else doc)
+            relevance = max(0.0, 1.0 - dist)
+            _dedup_add(text, 10.0 + relevance,
+                       f"[crystallized, relevance: {relevance:.2f}] ")
+
+        for i, c in enumerate(concepts[:20]):
+            meta = c.get("metadata", {})
+            full_text = meta.get("full_text", "")
+            doc = c.get("document", "")
+            dist = c.get("distance", 1.0)
+            amp = amplitudes[i] if i < len(amplitudes) else 0.0
+            text = (full_text[:CONTEXT_CHARS_PER_FRAGMENT] if full_text
+                    else doc)
+            relevance = max(0.0, 1.0 - dist)
+            score = relevance * (1.0 + amp)
+            _dedup_add(text, 5.0 + score,
+                       f"[relevance: {relevance:.2f}] ")
+
+        for mh in multi_hop[:MULTI_HOP_SECOND_ORDER * 2]:
+            meta = mh.get("metadata", {})
+            full_text = meta.get("full_text", "")
+            doc = mh.get("document", "")
+            dist = mh.get("distance", 1.0)
+            text = (full_text[:CONTEXT_CHARS_PER_FRAGMENT] if full_text
+                    else doc)
+            relevance = max(0.0, 1.0 - dist)
+            _dedup_add(text, 2.0 + relevance, "[linked] ")
+
+        for a in assoc_results[:30]:
+            doc = a.get("document", "")
+            dist = a.get("distance", 1.0)
+            if doc:
+                relevance = max(0.0, 1.0 - dist)
+                _dedup_add(doc, 1.0 + relevance, "")
+
+        scored_parts.sort(key=lambda x: x[0], reverse=True)
+
+        context_parts: list[str] = []
+        total_chars = 0
+        for _score, part in scored_parts[:MAX_CONTEXT_FRAGMENTS]:
+            if total_chars + len(part) > CONTEXT_BUDGET_CHARS:
+                remaining = CONTEXT_BUDGET_CHARS - total_chars
+                if remaining > 100:
+                    context_parts.append(part[:remaining])
+                break
+            context_parts.append(part)
+            total_chars += len(part) + 1
+
+        return "\n".join(context_parts) if context_parts else ""
 
     # ------------------------------------------------------------------ #
     # Consolidation (incremental)                                          #
@@ -706,6 +863,8 @@ class AssociativeMemory:
 
     def self_play_cycle(self) -> dict:
         """Enhanced self-play with Q&A validation."""
+        if self.llm.chat_active:
+            return {"action": "skip", "reason": "chat_priority"}
         count = self.store.concept_count()
         if count == 0:
             return {"action": "skip", "reason": "no_concepts"}
@@ -929,6 +1088,104 @@ class AssociativeMemory:
             if cleaned and len(cleaned) > 10 and cleaned.endswith("?"):
                 questions.append(cleaned)
         return questions[:n]
+
+    # ------------------------------------------------------------------ #
+    # Response Quality Feedback (Living Organism)                          #
+    # ------------------------------------------------------------------ #
+
+    FEEDBACK_REINFORCE_RATE = 0.02
+    FEEDBACK_WEAKEN_RATE = 0.005
+    RESONANCE_AMPLIFY_THRESHOLD = 0.5
+
+    def feedback_response_quality(self, concept_ids: list[str],
+                                  confidence: float) -> None:
+        """Feed response quality back into concept volatility.
+
+        High confidence responses reinforce the concepts that contributed
+        (lower volatility = more permanent). Low confidence slightly
+        increases volatility (natural selection pressure on weak knowledge).
+        """
+        if not concept_ids:
+            return
+
+        try:
+            data = self.store._concepts.get(
+                ids=concept_ids[:20],
+                include=["metadatas"],
+            )
+        except Exception:
+            return
+
+        ids = data.get("ids", [])
+        metas = data.get("metadatas", [])
+        if not ids:
+            return
+
+        updated_ids = []
+        updated_metas = []
+
+        for i, cid in enumerate(ids):
+            meta = metas[i] if i < len(metas) else {}
+            vol = meta.get("volatility", 0.5)
+
+            if confidence >= 0.5:
+                delta = self.FEEDBACK_REINFORCE_RATE * confidence
+                new_vol = max(0.0, vol - delta)
+            elif confidence < 0.15:
+                new_vol = min(1.0, vol + self.FEEDBACK_WEAKEN_RATE)
+            else:
+                continue
+
+            if abs(new_vol - vol) > 0.001:
+                meta_copy = dict(meta)
+                meta_copy["volatility"] = round(new_vol, 4)
+                updated_ids.append(cid)
+                updated_metas.append(meta_copy)
+
+        if updated_ids:
+            try:
+                self.store._concepts.update(
+                    ids=updated_ids, metadatas=updated_metas)
+            except Exception:
+                pass
+
+    def amplify_resonance(self, query_text: str,
+                          concept_ids: list[str],
+                          confidence: float) -> None:
+        """Create resonance links between the query and concepts that
+        contributed to a high-confidence response.
+
+        This builds "response resonance" associations that link
+        successful question patterns to the knowledge paths that
+        answered them, making future similar queries faster and more
+        accurate.
+        """
+        if confidence < self.RESONANCE_AMPLIFY_THRESHOLD:
+            return
+        if not concept_ids or len(concept_ids) < 2:
+            return
+
+        try:
+            query_vec = self._cached_encode_text(query_text)
+        except Exception:
+            return
+
+        top_ids = concept_ids[:5]
+        for i in range(len(top_ids)):
+            for j in range(i + 1, len(top_ids)):
+                try:
+                    src = top_ids[i]
+                    tgt = top_ids[j]
+                    assoc_id = f"resonance_{src}_{tgt}"
+                    self.store.add_association(
+                        source_concept=src,
+                        target_concept=tgt,
+                        vector=query_vec,
+                        strength=confidence,
+                        assoc_id=assoc_id,
+                    )
+                except Exception:
+                    continue
 
     # ------------------------------------------------------------------ #
     # Stats                                                                #

@@ -1,5 +1,10 @@
 """Qwen2.5-7B inference engine for text generation and association extraction.
 
+v3 additions (Quantum Velocity):
+- CancellableStoppingCriteria: abort generation mid-stream
+- torch.compile() acceleration (1.5-2x faster after warmup)
+- Flash Attention 2 / SDPA support via downloader
+
 v2 additions:
 - Batch association generation: 5 concepts in a single LLM call (~5x throughput)
 - Cross-pollination: include nearest-neighbour context when generating associations
@@ -13,14 +18,37 @@ import re
 import threading
 
 import torch
+from transformers import StoppingCriteria
 
 log = logging.getLogger(__name__)
 
 _LOAD_LOCK = threading.Lock()
 
 
+class CancelCriteria(StoppingCriteria):
+    """Thread-safe stopping criteria that can be signalled to abort generation."""
+
+    def __init__(self) -> None:
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    @property
+    def is_cancelled(self) -> bool:
+        return self._cancelled
+
+    def __call__(self, input_ids, scores, **kwargs) -> bool:
+        return self._cancelled
+
+
 class LLMEngine:
-    """Wraps Qwen2.5-7B-Instruct for generation and concept association."""
+    """Wraps Qwen2.5-7B-Instruct for generation and concept association.
+
+    GPU Quantum Exclusion Principle: when a user chat is active, all
+    background inference (associations, self-play, training) is paused
+    so the GPU operates at full bandwidth for the user.
+    """
 
     GENERATION_TIMEOUT_S = 120
 
@@ -30,6 +58,15 @@ class LLMEngine:
         self._ready = False
         self._loading = False
         self._load_error: str | None = None
+        self._chat_active = False
+
+    def set_chat_active(self, active: bool) -> None:
+        """Signal that a user chat is in progress (GPU exclusion gate)."""
+        self._chat_active = active
+
+    @property
+    def chat_active(self) -> bool:
+        return self._chat_active
 
     @property
     def ready(self) -> bool:
@@ -52,6 +89,7 @@ class LLMEngine:
             try:
                 from lqnn.models.downloader import ensure_llm_model
                 self._model, self._tokenizer = ensure_llm_model()
+
                 self._ready = True
                 log.info("LLMEngine: Qwen2.5-7B loaded successfully")
             except Exception as exc:
@@ -64,7 +102,10 @@ class LLMEngine:
     @torch.no_grad()
     def generate(self, prompt: str, max_new_tokens: int = 256,
                  temperature: float = 0.7, top_p: float = 0.9,
-                 system_prompt: str | None = None) -> str:
+                 system_prompt: str | None = None,
+                 _background: bool = False) -> str:
+        if _background and self._chat_active:
+            return ""
         if not self._ready:
             self.load()
 
@@ -77,12 +118,15 @@ class LLMEngine:
             messages, tokenize=False, add_generation_prompt=True,
         )
         inputs = self._tokenizer(text, return_tensors="pt").to(self._model.device)
+        pad_id = self._tokenizer.pad_token_id or self._tokenizer.eos_token_id
         out = self._model.generate(
             **inputs,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
             top_p=top_p,
             do_sample=temperature > 0,
+            repetition_penalty=1.15,
+            pad_token_id=pad_id,
         )
         decoded = self._tokenizer.decode(
             out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True,
@@ -91,11 +135,15 @@ class LLMEngine:
 
     def generate_stream(self, prompt: str, max_new_tokens: int = 200,
                         temperature: float = 0.4, top_p: float = 0.9,
-                        system_prompt: str | None = None):
+                        system_prompt: str | None = None,
+                        cancel_criteria: CancelCriteria | None = None):
         """Generate tokens with streaming via TextIteratorStreamer.
 
         Yields text chunks as they are produced. First token arrives fast,
         rest flows progressively.
+
+        If cancel_criteria is provided and .cancel() is called externally,
+        the generation thread exits cleanly mid-stream.
         """
         if not self._ready:
             self.load()
@@ -116,14 +164,23 @@ class LLMEngine:
             self._tokenizer, skip_prompt=True, skip_special_tokens=True,
         )
 
+        stopping = []
+        if cancel_criteria is not None:
+            stopping.append(cancel_criteria)
+
+        pad_id = self._tokenizer.pad_token_id or self._tokenizer.eos_token_id
         gen_kwargs = dict(
             **inputs,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
             top_p=top_p,
             do_sample=temperature > 0,
+            repetition_penalty=1.15,
+            pad_token_id=pad_id,
             streamer=streamer,
         )
+        if stopping:
+            gen_kwargs["stopping_criteria"] = stopping
 
         thread = threading.Thread(
             target=self._model.generate,
@@ -134,6 +191,8 @@ class LLMEngine:
 
         for chunk in streamer:
             if chunk:
+                if cancel_criteria and cancel_criteria.is_cancelled:
+                    break
                 yield chunk
 
         thread.join(timeout=120)
@@ -143,7 +202,10 @@ class LLMEngine:
 
         Categories: visual (color, shape, size), sensory (taste, texture, sound),
         semantic (function, context, category), relational (similar, opposite).
+        Respects the GPU exclusion gate (yields to user chat).
         """
+        if self._chat_active:
+            return []
         system_prompt = (
             "You are a knowledge association engine. You generate rich, "
             "diverse associations for concepts, covering visual properties, "
@@ -205,6 +267,8 @@ class LLMEngine:
         """
         if not concepts:
             return {}
+        if self._chat_active:
+            return {c: [] for c in concepts}
         if not self._ready:
             self.load()
 

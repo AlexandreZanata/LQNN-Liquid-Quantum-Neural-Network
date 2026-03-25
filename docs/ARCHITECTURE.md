@@ -1,11 +1,14 @@
-# LQNN v3.1 - Architecture
+# LQNN v5.0 - Quantum Velocity Architecture
 
 ## Overview
 
-LQNN v3.1 is a **Quantum Associative Brain** -- an AI system that learns like the
-human brain by encoding concepts as associative vectors in a shared
-visual-linguistic space with phased training, autonomous self-evolution,
-and a 100x-throughput quantum processing engine.
+LQNN v5.0 is a **Quantum Associative Brain** -- a self-evolving AI organism that
+learns like the human brain by encoding concepts as associative vectors in a shared
+visual-linguistic space with Flash Attention 2 / SDPA acceleration,
+adaptive priority-lane batching, **GPU Quantum Exclusion** (100% GPU for chat),
+a **Quantum Tunneling Fast Path** for low-latency inference, a **Quantum
+Decoherence Shield** that filters corrupted data, and a living feedback loop
+that strengthens knowledge through response resonance.
 
 ## Core Principle
 
@@ -85,37 +88,65 @@ metadata** that controls how long each piece of knowledge persists.
 | Component | File | Purpose |
 |-----------|------|---------|
 | Vector Store | `vector_store.py` | ChromaDB with f16 storage, batch ops, dirty-set, crystal tier |
-| Associative Memory | `associative_memory.py` | Wave-collapse engine with multi-hop probing |
-| Batch Engine | `quantum_batch_engine.py` | GPU-saturating batch pipelines with priority lanes |
-| Entanglement Index | `entanglement_index.py` | 3-level hierarchical cluster index (HEI) |
-| Temporal Pipeline | `temporal_pipeline.py` | 5-stage overlapping continuous processing |
+| Associative Memory | `associative_memory.py` | Wave-collapse engine with HEI pre-filter, batch engine, superposition context assembly |
+| Batch Engine | `quantum_batch_engine.py` | GPU-saturating batch pipelines with priority sorting + batched queries |
+| Entanglement Index | `entanglement_index.py` | 3-level hierarchical cluster index (HEI), wired into query path via narrow() |
+| Temporal Pipeline | `temporal_pipeline.py` | 5-stage overlapping continuous processing, batch engine integrated |
 | Phase Space | `phase_space.py` | Matryoshka search, adaptive chunks, diversity pruning |
 
 ### Data Flow
 
-#### Learning Flow (Visual-first + Batch)
+#### Learning Flow (Library-focused + Batch)
 ```
-Input (text + optional image)
+Knowledge Library (PDF, text, images via UI upload)
+  -> Ingestion Pipeline (extract, chunk, validate)
   -> Batch Engine (NORMAL lane)
   -> GPU batch CLIP encode (up to 64 items)
   -> Float16 storage in ChromaDB
   -> HEI incremental cluster assignment
-  -> Background association workers (1-4 threads)
+  -> Background association workers (1-8 threads, GPU-priority aware)
   -> Temporal Pipeline integration stage
+
+Training Loop (every 60s, NO web crawling):
+  -> Consolidation (every 2 cycles: crystallise / prune)
+  -> Self-play (every 2 cycles: validate own knowledge)
+  -> Library reinforcement (every 3 cycles: strengthen sparse associations)
+  -> HEI rebuild (every 30 cycles)
+
+Agents (ON-DEMAND ONLY, not in training loop):
+  -> Activated only when chat confidence < 0.08 (reactive search)
+  -> Or when user explicitly triggers search from UI
+  -> Extreme quality filtering: decoherence shield + boilerplate + CLIP gate
 ```
 
-#### Query Flow (Wave-Collapse)
+#### Query Flow (Wave-Collapse v5 + Quantum Tunneling)
 ```
 Question (text)
-  -> GPU hot cache check (skip encode if cached)
-  -> CLIP encode via CUDA stream
-  -> Crystal tier fast scan (in-memory numpy)
-  -> Adaptive ANN search (n=5 -> 25 -> 50)
+  -> GPU Exclusion Gate ACTIVATE (pause all background LLM work)
+  -> GPU hot cache check (4000 vectors, skip encode if cached)
+  -> CLIP encode via Batch Engine (URGENT lane, instant wake)
+  -> HEI.narrow() + Crystal tier scan (parallel, 8 workers)
+  -> Adaptive ANN search with ID filter (n=5 -> 25 -> 50)
   -> Probability amplitude computation
   -> Interference patterns (constructive/destructive)
-  -> Multi-hop probes (5 entangled concepts -> second-order knowledge)
-  -> Build rich context (~15 000 chars, 30 fragments)
-  -> LLM answer with expanded context (up to 500 tokens)
+  -> Dynamic multi-hop probes (3-12 based on confidence history)
+  -> Superposition Context Assembly:
+      Quantum Decoherence Shield (filter garbage/corrupted data)
+      Dedup + relevance ranking + hierarchical priority
+      Crystal > Primary > Multi-hop > Associations
+      Budget: ~8000 chars (~2K tokens, Heisenberg-optimal for 7B)
+  -> Conversation history injection (last 10 turns)
+  -> Quantum Tunneling Fast Path (most queries):
+      Single-pass 1500 tokens with repetition_penalty=1.15
+  -> Complex queries only (rare):
+      Phase 1: Streamed outline (150 tokens, 3-5 sections)
+      Phase 2: Section generation (up to 5 x 800 tokens)
+      (No verification in streaming -- tunnels directly to answer)
+      Total output: up to 6000 tokens
+  -> Response quality feedback (volatility reinforcement)
+  -> Neural resonance amplification (association strengthening)
+  -> GPU Exclusion Gate RELEASE (resume background work)
+  -> Cancellable at any phase via StoppingCriteria
 ```
 
 #### Consolidation Flow (Incremental)

@@ -318,4 +318,10 @@ def create_app(controller=None, ws_server=None, trainer=None) -> FastAPI:
             return {"error": "not_initialized"}
         return await asyncio.to_thread(_trainer.run_benchmark)
 
+    @app.get("/api/benchmark/frontier")
+    async def run_frontier_benchmark():
+        if not _trainer:
+            return {"error": "not_initialized"}
+        return await asyncio.to_thread(_trainer.run_frontier_benchmark)
+
     return app

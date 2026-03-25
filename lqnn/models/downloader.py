@@ -64,6 +64,21 @@ def ensure_llm_model() -> tuple:
     )
 
     device = _device()
+
+    extra_kwargs: dict = {}
+    if device == "cuda":
+        try:
+            from transformers.utils import is_flash_attn_2_available
+            if is_flash_attn_2_available():
+                extra_kwargs["attn_implementation"] = "flash_attention_2"
+                log.info("Flash Attention 2 available -- enabling for 2-4x faster attention")
+            else:
+                extra_kwargs["attn_implementation"] = "sdpa"
+                log.info("Flash Attention 2 not installed -- using PyTorch SDPA fallback")
+        except ImportError:
+            extra_kwargs["attn_implementation"] = "sdpa"
+            log.info("Using PyTorch SDPA attention implementation")
+
     model = AutoModelForCausalLM.from_pretrained(
         LLM_MODEL_ID,
         quantization_config=bnb_config if device == "cuda" else None,
@@ -71,6 +86,7 @@ def ensure_llm_model() -> tuple:
         device_map="auto" if device == "cuda" else None,
         cache_dir=str(CACHE_DIR),
         trust_remote_code=True,
+        **extra_kwargs,
     )
     if device == "cpu":
         model = model.to(device)

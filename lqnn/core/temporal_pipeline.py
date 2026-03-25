@@ -25,12 +25,12 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
-PERCEPTION_QUEUE_MAX = 500
-ENCODING_BATCH_SIZE = 64
-INTEGRATION_BATCH_SIZE = 100
-CONSOLIDATION_INTERVAL_S = 120
-RESONANCE_INTERVAL_S = 300
-PIPELINE_TICK_MS = 25
+DEFAULT_PERCEPTION_QUEUE_MAX = 500
+DEFAULT_ENCODING_BATCH_SIZE = 64
+DEFAULT_INTEGRATION_BATCH_SIZE = 100
+DEFAULT_CONSOLIDATION_INTERVAL_S = 120
+DEFAULT_RESONANCE_INTERVAL_S = 300
+DEFAULT_PIPELINE_TICK_MS = 25
 
 
 @dataclass
@@ -74,13 +74,19 @@ class TemporalPipeline:
         self._batch_engine = batch_engine
         self._hei = hei
         self._emit = event_callback or (lambda e: None)
+        self._profile = "default"
+        self._encoding_batch_size = DEFAULT_ENCODING_BATCH_SIZE
+        self._integration_batch_size = DEFAULT_INTEGRATION_BATCH_SIZE
+        self._consolidation_interval_s = DEFAULT_CONSOLIDATION_INTERVAL_S
+        self._resonance_interval_s = DEFAULT_RESONANCE_INTERVAL_S
+        self._pipeline_tick_ms = DEFAULT_PIPELINE_TICK_MS
 
         self._perception_q: asyncio.Queue[PipelineItem] = asyncio.Queue(
-            maxsize=PERCEPTION_QUEUE_MAX)
+            maxsize=DEFAULT_PERCEPTION_QUEUE_MAX)
         self._encoding_q: asyncio.Queue[PipelineItem] = asyncio.Queue(
-            maxsize=ENCODING_BATCH_SIZE * 4)
+            maxsize=DEFAULT_ENCODING_BATCH_SIZE * 4)
         self._integration_q: asyncio.Queue[PipelineItem] = asyncio.Queue(
-            maxsize=INTEGRATION_BATCH_SIZE * 4)
+            maxsize=DEFAULT_INTEGRATION_BATCH_SIZE * 4)
 
         self._running = False
         self._tasks: list[asyncio.Task] = []
@@ -157,12 +163,12 @@ class TemporalPipeline:
     # ------------------------------------------------------------------ #
 
     async def _stage_encoding(self) -> None:
-        """Batch-encode items using CLIP."""
+        """Batch-encode items using CLIP via QuantumBatchEngine when available."""
         while self._running:
             batch: list[PipelineItem] = []
-            deadline = time.monotonic() + PIPELINE_TICK_MS / 1000
+            deadline = time.monotonic() + self._pipeline_tick_ms / 1000
 
-            while len(batch) < ENCODING_BATCH_SIZE and time.monotonic() < deadline:
+            while len(batch) < self._encoding_batch_size and time.monotonic() < deadline:
                 try:
                     item = self._encoding_q.get_nowait()
                     batch.append(item)
@@ -171,13 +177,17 @@ class TemporalPipeline:
                     break
 
             if not batch:
-                await asyncio.sleep(PIPELINE_TICK_MS / 1000)
+                await asyncio.sleep(self._pipeline_tick_ms / 1000)
                 continue
 
             texts = [item.text[:512] for item in batch]
             try:
-                vectors = await asyncio.to_thread(
-                    self._memory.clip.encode_texts, texts)
+                if self._batch_engine is not None:
+                    vectors = await asyncio.to_thread(
+                        self._batch_engine.encode_texts_urgent, texts)
+                else:
+                    vectors = await asyncio.to_thread(
+                        self._memory.clip.encode_texts, texts)
                 for item, vec in zip(batch, vectors):
                     item.vector = vec
                     try:
@@ -199,9 +209,9 @@ class TemporalPipeline:
 
         while self._running:
             batch: list[PipelineItem] = []
-            deadline = time.monotonic() + PIPELINE_TICK_MS * 2 / 1000
+            deadline = time.monotonic() + self._pipeline_tick_ms * 2 / 1000
 
-            while len(batch) < INTEGRATION_BATCH_SIZE and time.monotonic() < deadline:
+            while len(batch) < self._integration_batch_size and time.monotonic() < deadline:
                 try:
                     item = self._integration_q.get_nowait()
                     if item.vector is not None:
@@ -211,7 +221,7 @@ class TemporalPipeline:
                     break
 
             if not batch:
-                await asyncio.sleep(PIPELINE_TICK_MS * 2 / 1000)
+                await asyncio.sleep(self._pipeline_tick_ms * 2 / 1000)
                 continue
 
             entries = []
@@ -268,7 +278,7 @@ class TemporalPipeline:
         while self._running:
             await asyncio.sleep(5)
             elapsed = time.time() - self._last_consolidation
-            if elapsed < CONSOLIDATION_INTERVAL_S:
+            if elapsed < self._consolidation_interval_s:
                 continue
 
             try:
@@ -296,7 +306,7 @@ class TemporalPipeline:
         while self._running:
             await asyncio.sleep(10)
             elapsed = time.time() - self._last_resonance
-            if elapsed < RESONANCE_INTERVAL_S:
+            if elapsed < self._resonance_interval_s:
                 continue
 
             try:
@@ -326,6 +336,12 @@ class TemporalPipeline:
         uptime = time.time() - self._start_time if self._start_time else 0
         throughput = self._metrics.integrated / max(uptime, 1)
         return {
+            "profile": self._profile,
+            "encoding_batch_size": self._encoding_batch_size,
+            "integration_batch_size": self._integration_batch_size,
+            "pipeline_tick_ms": self._pipeline_tick_ms,
+            "consolidation_interval_s": self._consolidation_interval_s,
+            "resonance_interval_s": self._resonance_interval_s,
             "perceived": self._metrics.perceived,
             "encoded": self._metrics.encoded,
             "integrated": self._metrics.integrated,
@@ -337,3 +353,22 @@ class TemporalPipeline:
             "integration_q": self._integration_q.qsize(),
             "uptime_s": round(uptime, 1),
         }
+
+    def set_quantum_profile(self, profile: str) -> dict:
+        """Tune overlap stages for benchmark mode without changing hardware."""
+        profile = (profile or "").strip().lower()
+        if profile == "frontier_train_only":
+            self._profile = profile
+            self._encoding_batch_size = 96
+            self._integration_batch_size = 140
+            self._pipeline_tick_ms = 20
+            self._consolidation_interval_s = 90
+            self._resonance_interval_s = 240
+        else:
+            self._profile = "default"
+            self._encoding_batch_size = DEFAULT_ENCODING_BATCH_SIZE
+            self._integration_batch_size = DEFAULT_INTEGRATION_BATCH_SIZE
+            self._pipeline_tick_ms = DEFAULT_PIPELINE_TICK_MS
+            self._consolidation_interval_s = DEFAULT_CONSOLIDATION_INTERVAL_S
+            self._resonance_interval_s = DEFAULT_RESONANCE_INTERVAL_S
+        return self.stats()

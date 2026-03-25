@@ -28,6 +28,14 @@ BOILERPLATE_PATTERNS = [
     "add to cart", "buy now", "free trial", "download now",
     "unsubscribe", "opt out", "manage consent", "we use cookies",
     "this site uses", "by continuing", "you agree to",
+    "enable notifications", "allow notifications", "push notifications",
+    "sponsored content", "related articles", "trending now",
+    "sign up for free", "create account", "forgot password",
+    "leave a comment", "post a comment", "reply to",
+    "breaking news", "latest news", "top stories",
+    "page not found", "404 error", "access denied",
+    "captcha", "verify you are human", "cloudflare",
+    "%n%n", "%s%s", "rnd=", ";app=", ";uid=",
 ]
 
 BOILERPLATE_RE = re.compile(
@@ -73,20 +81,24 @@ class CycleReport:
 
 
 class JudgeAgent:
-    """Validates knowledge quality before it enters the memory.
+    """Extreme quality gate for web-sourced knowledge.
 
+    v5: Much stricter filtering to prevent garbage from entering the brain.
     Multi-layer quality gate:
     1. Boilerplate blacklist -- reject web junk (login prompts, cookie banners)
-    2. Alpha ratio -- reject code, URLs, garbled text
-    3. CLIP relevance -- reject content unrelated to the search topic
-    4. Duplicate detection -- reject near-identical vectors
+    2. Alpha ratio -- reject code, URLs, garbled text (raised to 0.70)
+    3. Decoherence shield -- reject binary artefacts and corrupted data
+    4. CLIP relevance -- reject content unrelated to search topic (raised to 0.40)
+    5. Minimum word count -- reject fragments that are too sparse
+    6. Duplicate detection -- reject near-identical vectors (tightened to 0.10)
     """
 
-    MIN_TEXT_LENGTH = 30
-    MAX_TEXT_LENGTH = 5000
-    DUPLICATE_THRESHOLD = 0.12
-    CLIP_RELEVANCE_THRESHOLD = 0.30
-    TEXT_RELEVANCE_THRESHOLD = 0.20
+    MIN_TEXT_LENGTH = 50
+    MAX_TEXT_LENGTH = 3000
+    MIN_WORD_COUNT = 8
+    DUPLICATE_THRESHOLD = 0.10
+    CLIP_RELEVANCE_THRESHOLD = 0.40
+    TEXT_RELEVANCE_THRESHOLD = 0.35
 
     @staticmethod
     def is_boilerplate(text: str) -> bool:
@@ -107,9 +119,31 @@ class JudgeAgent:
         if self.is_boilerplate(text):
             return False, "boilerplate"
         alpha_ratio = sum(c.isalpha() or c.isspace() for c in text) / max(len(text), 1)
-        if alpha_ratio < 0.6:
+        if alpha_ratio < 0.70:
             return False, "text_not_coherent"
+        word_count = len(text.split())
+        if word_count < self.MIN_WORD_COUNT:
+            return False, "too_few_words"
+        if not self._passes_decoherence_shield(text):
+            return False, "decoherence_garbage"
         return True, "ok"
+
+    @staticmethod
+    def _passes_decoherence_shield(text: str) -> bool:
+        """Reject corrupted data, binary artefacts, encoded strings."""
+        sample = text[:300].lower()
+        garbage_indicators = [
+            "%n%n", "%s%s", "rnd=", ";app=", ";uid=",
+            "\\x", "\\u00", "68bac", "0a27c", "itrade",
+            "76ff3d", "b8fca4", "r_1;uid",
+        ]
+        hits = sum(1 for g in garbage_indicators if g in sample)
+        if hits >= 1:
+            return False
+        non_ascii = sum(1 for c in text[:200] if ord(c) > 127 and not c.isalpha())
+        if non_ascii / max(len(text[:200]), 1) > 0.15:
+            return False
+        return True
 
     def judge_text_relevance(self, memory: AssociativeMemory,
                              text: str, concept: str) -> tuple[bool, float]:
@@ -180,11 +214,14 @@ class JudgeAgent:
 
 
 class AgentManager:
-    """Orchestrates the autonomous knowledge acquisition pipeline.
+    """On-demand knowledge acquisition agent.
 
-    Phase-aware: adapts seed concepts and search strategies based on
-    the current training phase (visual objects, abstract concepts, or
-    self-evolution).
+    v5: Agents are NOT called from the training loop.  They activate ONLY:
+      1. When a user chat has very low confidence (reactive search)
+      2. When the user explicitly triggers a search from the UI
+
+    Every piece of web content passes through extreme quality filtering
+    (JudgeAgent + Decoherence Shield) before entering the knowledge base.
     """
 
     def __init__(self, memory: AssociativeMemory,
@@ -243,6 +280,7 @@ class AgentManager:
         """
         from lqnn.training.continuous_trainer import (
             TrainingPhase, VISUAL_SEEDS, ABSTRACT_SEEDS, BENCHMARK_SEEDS,
+            FRONTIER_BENCHMARK_SEEDS,
         )
 
         gaps = []
@@ -255,6 +293,18 @@ class AgentManager:
                     concept=bq, confidence=0.0, priority=1.5,
                     prefer_images=False,
                 ))
+                if len(gaps) >= 3:
+                    break
+
+        if len(gaps) < 3:
+            for fq in FRONTIER_BENCHMARK_SEEDS[:4]:
+                existing = self.memory.store.get_concept(
+                    self.memory._make_id(fq))
+                if not existing:
+                    gaps.append(KnowledgeGap(
+                        concept=fq, confidence=0.0, priority=1.35,
+                        prefer_images=False,
+                    ))
                 if len(gaps) >= 3:
                     break
 
@@ -417,14 +467,18 @@ class AgentManager:
         return report
 
     async def _process_gap_online(self, gap: KnowledgeGap) -> tuple[int, int]:
-        """Search the web for a concept with aggressive quality filtering.
+        """Search the web for a concept with extreme quality filtering.
 
         Pipeline per sentence:
-        1. Boilerplate blacklist check
-        2. CLIP relevance gate (sentence must relate to search concept)
-        3. LLM extracts a clean 2-5 word concept label
-        4. Duplicate check
-        5. Store only if all gates pass
+        1. Decoherence shield (binary/garbage rejection)
+        2. Boilerplate blacklist check
+        3. Alpha ratio + word count validation
+        4. CLIP relevance gate (raised threshold: 0.40)
+        5. LLM extracts a clean 2-5 word concept label
+        6. Duplicate check (tightened threshold: 0.10)
+        7. Store only if ALL gates pass
+
+        Respects GPU exclusion gate -- skips LLM work during user chat.
         """
         import asyncio
         learned = 0
@@ -555,18 +609,23 @@ class AgentManager:
 
     @staticmethod
     def _extract_quality_sentences(text: str) -> list[str]:
-        """Extract meaningful sentences from page text, filtering junk."""
+        """Extract meaningful sentences from page text with strict filtering."""
         sentences = []
         for raw in re.split(r'[.!?]\s+', text):
             s = raw.strip()
-            if len(s) < 40:
+            if len(s) < 60:
                 continue
             if len(s) > 300:
                 s = s[:300]
             alpha_count = sum(c.isalpha() or c.isspace() for c in s)
-            if alpha_count / max(len(s), 1) < 0.7:
+            if alpha_count / max(len(s), 1) < 0.75:
                 continue
-            if s.count("http") > 1 or s.count("@") > 1:
+            if s.count("http") > 0 or s.count("@") > 0:
+                continue
+            word_count = len(s.split())
+            if word_count < 8:
+                continue
+            if not JudgeAgent._passes_decoherence_shield(s):
                 continue
             sentences.append(s)
         return sentences

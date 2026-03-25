@@ -10,6 +10,7 @@ let streamingText = "";
 let reasoningDiv = null;
 let pendingDeleteId = null;
 let sidebarOpen = true;
+let isStreaming = false;
 
 function connect() {
   socket = new WebSocket(WS_URL);
@@ -64,6 +65,8 @@ function handleMessage(data) {
     handleStreamToken(data.token);
   } else if (data.type === "chat_response") {
     finalizeStream(data);
+  } else if (data.type === "stream_cancelled") {
+    finalizeCancelledStream();
   } else if (data.type === "search_result") {
     appendSystem(
       `SEARCH complete: ${data.concepts_learned} concepts, ` +
@@ -195,6 +198,9 @@ function handleStreamToken(token) {
 }
 
 function finalizeStream(data) {
+  isStreaming = false;
+  updateStopButton();
+
   if (reasoningDiv) {
     reasoningDiv.classList.add("reasoning-complete");
     reasoningDiv = null;
@@ -235,6 +241,48 @@ function finalizeStream(data) {
     streamingText = "";
   } else {
     appendChat("assistant", data.response, data);
+  }
+}
+
+function finalizeCancelledStream() {
+  isStreaming = false;
+  updateStopButton();
+
+  if (reasoningDiv) {
+    reasoningDiv.classList.add("reasoning-complete");
+    reasoningDiv = null;
+  }
+
+  if (streamingDiv) {
+    const body = streamingDiv._bodyEl;
+    if (body) {
+      body.classList.remove("streaming-cursor");
+      if (streamingText) {
+        renderRichContent(body, streamingText + "\n\n*[ Generation stopped ]*");
+      } else {
+        body.textContent = "[ Generation cancelled ]";
+      }
+    }
+
+    if (streamingText) {
+      currentMessages.push({
+        role: "assistant",
+        text: streamingText,
+        meta: { cancelled: true },
+        timestamp: Date.now(),
+      });
+      saveCurrentSession().catch(() => {});
+    }
+
+    streamingDiv = null;
+    streamingText = "";
+  }
+}
+
+function updateStopButton() {
+  const btn = document.getElementById("btn-stop-stream");
+  if (btn) {
+    btn.style.display = isStreaming ? "inline-flex" : "none";
   }
 }
 
@@ -885,7 +933,9 @@ document.getElementById("chat-input").addEventListener("keydown", (e) => {
     if (!currentSessionId) return;
     cleanupPreviousStream();
     appendChat("user", text);
-    sendAction("chat_stream", { text });
+    isStreaming = true;
+    updateStopButton();
+    sendAction("chat_stream", { text, session_id: currentSessionId });
     input.value = "";
   }
 });
@@ -921,6 +971,15 @@ document.getElementById("btn-start-train").addEventListener("click", () => {
 document.getElementById("btn-stop-train").addEventListener("click", () => {
   sendAction("stop_training");
 });
+
+const stopStreamBtn = document.getElementById("btn-stop-stream");
+if (stopStreamBtn) {
+  stopStreamBtn.addEventListener("click", () => {
+    sendAction("cancel_stream");
+    isStreaming = false;
+    updateStopButton();
+  });
+}
 
 // -- INIT --
 appendSystem("Initializing quantum brain terminal...");

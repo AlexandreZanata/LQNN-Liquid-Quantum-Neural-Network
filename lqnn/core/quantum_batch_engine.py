@@ -36,10 +36,10 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 # --- Tuning constants (RTX 4060 8 GB) --------------------------------
-CLIP_BATCH_SIZE = 64
-CHROMA_WRITE_BATCH = 100
-CHROMA_QUERY_BATCH = 32
-FLUSH_INTERVAL_MS = 50
+DEFAULT_CLIP_BATCH_SIZE = 64
+DEFAULT_CHROMA_WRITE_BATCH = 100
+DEFAULT_CHROMA_QUERY_BATCH = 32
+DEFAULT_FLUSH_INTERVAL_MS = 20   # reduced from 50ms; URGENT items wake instantly
 # ----------------------------------------------------------------------
 
 
@@ -92,6 +92,14 @@ class QuantumBatchEngine:
         self._running = False
         self._loop: asyncio.AbstractEventLoop | None = None
         self._tasks: list[asyncio.Task] = []
+        self._profile = "default"
+        self._clip_batch_size = DEFAULT_CLIP_BATCH_SIZE
+        self._write_batch_size = DEFAULT_CHROMA_WRITE_BATCH
+        self._query_batch_size = DEFAULT_CHROMA_QUERY_BATCH
+        self._flush_interval_ms = DEFAULT_FLUSH_INTERVAL_MS
+
+        self._urgent_encode_event = threading.Event()
+        self._urgent_query_event = threading.Event()
 
         # stats
         self._encode_batches = 0
@@ -115,8 +123,10 @@ class QuantumBatchEngine:
             asyncio.create_task(self._write_flush_loop()),
             asyncio.create_task(self._query_flush_loop()),
         ]
-        log.info("QuantumBatchEngine started (batch=%d, flush=%dms)",
-                 CLIP_BATCH_SIZE, FLUSH_INTERVAL_MS)
+        log.info(
+            "QuantumBatchEngine started (profile=%s, batch=%d, flush=%dms)",
+            self._profile, self._clip_batch_size, self._flush_interval_ms,
+        )
 
     async def stop(self) -> None:
         self._running = False
@@ -147,6 +157,8 @@ class QuantumBatchEngine:
         req = _EncodeRequest(texts=texts, future=fut, priority=priority)
         with self._lock:
             self._encode_queue.append(req)
+        if priority == Priority.URGENT:
+            self._urgent_encode_event.set()
         return fut
 
     # ------------------------------------------------------------------ #
@@ -172,13 +184,16 @@ class QuantumBatchEngine:
         return self._store.query_concepts(vector, n)
 
     def submit_query(self, vector: np.ndarray, n: int = 10,
-                     collection: str = "concepts") -> Future:
+                     collection: str = "concepts",
+                     urgent: bool = False) -> Future:
         """Submit a query for batched execution.  Returns Future[list[dict]]."""
         fut: Future = Future()
         with self._lock:
             self._query_queue.append(
                 _QueryRequest(vector=vector, n=n, future=fut,
                               collection=collection))
+        if urgent:
+            self._urgent_query_event.set()
         return fut
 
     # ------------------------------------------------------------------ #
@@ -186,16 +201,19 @@ class QuantumBatchEngine:
     # ------------------------------------------------------------------ #
 
     async def _encode_flush_loop(self) -> None:
-        interval = FLUSH_INTERVAL_MS / 1000
+        interval = self._flush_interval_ms / 1000
         while self._running:
-            await asyncio.sleep(interval)
+            woke_urgent = await asyncio.to_thread(
+                self._urgent_encode_event.wait, interval)
+            if woke_urgent:
+                self._urgent_encode_event.clear()
             try:
                 await asyncio.to_thread(self._flush_encode_now)
             except Exception as exc:
                 log.debug("Encode flush error: %s", exc)
 
     async def _write_flush_loop(self) -> None:
-        interval = FLUSH_INTERVAL_MS / 1000
+        interval = self._flush_interval_ms / 1000
         while self._running:
             await asyncio.sleep(interval)
             try:
@@ -204,9 +222,12 @@ class QuantumBatchEngine:
                 log.debug("Write flush error: %s", exc)
 
     async def _query_flush_loop(self) -> None:
-        interval = FLUSH_INTERVAL_MS / 1000
+        interval = self._flush_interval_ms / 1000
         while self._running:
-            await asyncio.sleep(interval)
+            woke_urgent = await asyncio.to_thread(
+                self._urgent_query_event.wait, interval)
+            if woke_urgent:
+                self._urgent_query_event.clear()
             try:
                 await asyncio.to_thread(self._flush_queries_now)
             except Exception as exc:
@@ -217,13 +238,20 @@ class QuantumBatchEngine:
     # ------------------------------------------------------------------ #
 
     def _flush_encode_now(self) -> None:
-        """Drain up to CLIP_BATCH_SIZE encode requests and process as one GPU call."""
+        """Drain up to configured encode batch and process as one GPU call.
+
+        URGENT requests are sorted to the front of the batch so chat-path
+        encodes are never delayed by background ingestion.
+        """
         with self._lock:
             batch: list[_EncodeRequest] = []
-            while self._encode_queue and len(batch) < CLIP_BATCH_SIZE:
+            while self._encode_queue and len(batch) < self._clip_batch_size:
                 batch.append(self._encode_queue.popleft())
         if not batch:
             return
+
+        batch.sort(key=lambda r: (0 if r.priority == Priority.URGENT else 1,
+                                   r.created_at))
 
         all_texts: list[str] = []
         slices: list[tuple[int, int]] = []
@@ -247,7 +275,7 @@ class QuantumBatchEngine:
         """Drain up to CHROMA_WRITE_BATCH write requests and upsert at once."""
         with self._lock:
             batch: list[_WriteRequest] = []
-            while self._write_queue and len(batch) < CHROMA_WRITE_BATCH:
+            while self._write_queue and len(batch) < self._write_batch_size:
                 batch.append(self._write_queue.popleft())
         if not batch:
             return
@@ -293,24 +321,57 @@ class QuantumBatchEngine:
                     wr.future.set_exception(exc)
 
     def _flush_queries_now(self) -> None:
-        """Drain up to CHROMA_QUERY_BATCH query requests and execute."""
+        """Drain up to CHROMA_QUERY_BATCH query requests and execute.
+
+        Concept queries targeting the same collection are batched into a
+        single Chroma multi-query call for much lower overhead.
+        Association queries are still executed individually (different collection).
+        """
         with self._lock:
             batch: list[_QueryRequest] = []
-            while self._query_queue and len(batch) < CHROMA_QUERY_BATCH:
+            while self._query_queue and len(batch) < self._query_batch_size:
                 batch.append(self._query_queue.popleft())
         if not batch:
             return
 
+        concept_batch: list[_QueryRequest] = []
+        assoc_batch: list[_QueryRequest] = []
         for qr in batch:
+            if qr.collection == "associations":
+                assoc_batch.append(qr)
+            else:
+                concept_batch.append(qr)
+
+        if concept_batch:
             try:
-                if qr.collection == "associations":
-                    result = self._store.query_associations(qr.vector, qr.n)
-                else:
-                    result = self._store.query_concepts(qr.vector, qr.n)
-                qr.future.set_result(result)
+                max_n = max(qr.n for qr in concept_batch)
+                vectors = [qr.vector for qr in concept_batch]
+                all_results = self._store.batch_query_concepts(vectors, max_n)
+                for qr, results in zip(concept_batch, all_results):
+                    qr.future.set_result(results[:qr.n])
             except Exception as exc:
-                if not qr.future.done():
-                    qr.future.set_exception(exc)
+                for qr in concept_batch:
+                    if not qr.future.done():
+                        qr.future.set_exception(exc)
+
+        if assoc_batch:
+            try:
+                max_n = max(qr.n for qr in assoc_batch)
+                vectors = [qr.vector for qr in assoc_batch]
+                all_results = self._store.batch_query_associations(
+                    vectors, max_n)
+                for qr, results in zip(assoc_batch, all_results):
+                    qr.future.set_result(results[:qr.n])
+            except Exception:
+                for qr in assoc_batch:
+                    try:
+                        result = self._store.query_associations(
+                            qr.vector, qr.n)
+                        qr.future.set_result(result)
+                    except Exception as exc:
+                        if not qr.future.done():
+                            qr.future.set_exception(exc)
+
         self._query_batches += 1
         self._query_items += len(batch)
 
@@ -320,6 +381,11 @@ class QuantumBatchEngine:
 
     def stats(self) -> dict:
         return {
+            "profile": self._profile,
+            "clip_batch_size": self._clip_batch_size,
+            "write_batch_size": self._write_batch_size,
+            "query_batch_size": self._query_batch_size,
+            "flush_interval_ms": self._flush_interval_ms,
             "encode_batches": self._encode_batches,
             "encode_items": self._encode_items,
             "write_batches": self._write_batches,
@@ -330,3 +396,20 @@ class QuantumBatchEngine:
             "write_queue_len": len(self._write_queue),
             "query_queue_len": len(self._query_queue),
         }
+
+    def set_quantum_profile(self, profile: str) -> dict:
+        """Tune runtime batching without requiring extra hardware."""
+        profile = (profile or "").strip().lower()
+        if profile == "frontier_train_only":
+            self._profile = profile
+            self._clip_batch_size = 96
+            self._write_batch_size = 128
+            self._query_batch_size = 48
+            self._flush_interval_ms = 35
+        else:
+            self._profile = "default"
+            self._clip_batch_size = DEFAULT_CLIP_BATCH_SIZE
+            self._write_batch_size = DEFAULT_CHROMA_WRITE_BATCH
+            self._query_batch_size = DEFAULT_CHROMA_QUERY_BATCH
+            self._flush_interval_ms = DEFAULT_FLUSH_INTERVAL_MS
+        return self.stats()
