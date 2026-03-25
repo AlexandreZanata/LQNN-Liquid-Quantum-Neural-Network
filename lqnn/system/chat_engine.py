@@ -23,7 +23,7 @@ import threading
 import time
 from typing import Callable
 
-from lqnn.core.associative_memory import AssociativeMemory, CollapseResult
+from lqnn.core.associative_memory import AssociativeMemory, CollapseResult, _is_coherent
 from lqnn.models.llm_engine import CancelCriteria, LLMEngine
 from lqnn.system.training_db import TrainingDB
 
@@ -484,7 +484,7 @@ class ChatEngine:
 
         concepts_found = [
             c.get("document", "") for c in collapse.matched_concepts[:5]
-            if c.get("document")
+            if c.get("document") and _is_coherent(c["document"])
         ]
 
         duration_ms = int((time.time() - t0) * 1000)
@@ -493,7 +493,7 @@ class ChatEngine:
         turn = {
             "role": "user",
             "text": user_text,
-            "response": response,
+            "response": response[:CONVERSATION_HISTORY_ASSISTANT_CHARS],
             "confidence": round(collapse.confidence, 3),
             "concepts": concepts_found,
             "timestamp": time.time(),
@@ -501,8 +501,8 @@ class ChatEngine:
             "context_chars": ctx_chars,
         }
         self._chat_history.append(turn)
-        if len(self._chat_history) > 200:
-            self._chat_history = self._chat_history[-100:]
+        if len(self._chat_history) > 50:
+            self._chat_history = self._chat_history[-30:]
 
         if self.training_db:
             try:
@@ -610,10 +610,10 @@ class ChatEngine:
 
             if collapse.matched_concepts:
                 top_concepts = [c.get("document", "")[:60]
-                                for c in collapse.matched_concepts[:3]
-                                if c.get("document")]
+                                for c in collapse.matched_concepts[:5]
+                                if c.get("document") and _is_coherent(c["document"])]
                 if top_concepts:
-                    _reason(f"Top associations: {', '.join(top_concepts)}")
+                    _reason(f"Top associations: {', '.join(top_concepts[:3])}")
 
             conversation_prefix = self._build_conversation_prefix()
             system_base = (
@@ -810,7 +810,7 @@ class ChatEngine:
 
             concepts_found = [
                 c.get("document", "") for c in collapse.matched_concepts[:5]
-                if c.get("document")
+                if c.get("document") and _is_coherent(c["document"])
             ]
             duration_ms = int((time.time() - t0) * 1000)
             _reason(f"Response complete in {duration_ms}ms "
@@ -818,14 +818,15 @@ class ChatEngine:
 
             stream_ctx_chars = len(collapse.context)
             turn = {
-                "role": "user", "text": user_text, "response": response,
+                "role": "user", "text": user_text,
+                "response": response[:CONVERSATION_HISTORY_ASSISTANT_CHARS],
                 "confidence": round(collapse.confidence, 3),
                 "concepts": concepts_found, "timestamp": time.time(),
                 "context_chars": stream_ctx_chars,
             }
             self._chat_history.append(turn)
-            if len(self._chat_history) > 200:
-                self._chat_history = self._chat_history[-100:]
+            if len(self._chat_history) > 50:
+                self._chat_history = self._chat_history[-30:]
 
             self._bg_maybe_learn(user_text, collapse)
 
@@ -875,9 +876,9 @@ class ChatEngine:
                 daemon=True,
             ).start()
 
-        if collapse.confidence < 0.05:
+        if collapse.confidence < 0.05 and _is_coherent(text):
             words = text.split()
-            if 1 <= len(words) <= 5:
+            if 3 <= len(words) <= 8:
                 threading.Thread(
                     target=self._maybe_learn_sync,
                     args=(text,),

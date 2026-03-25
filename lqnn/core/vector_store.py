@@ -462,6 +462,43 @@ class VectorStore:
             return [], np.empty((0, 512), dtype=np.float32)
         return ids, np.array(embeds, dtype=np.float32)
 
+    def purge_incoherent(self, coherence_fn) -> int:
+        """Delete concepts and associations whose document text fails *coherence_fn*.
+
+        Returns the total number of deleted entries.
+        """
+        deleted = 0
+        for collection in (self._concepts, self._associations):
+            try:
+                data = collection.get(include=["documents", "metadatas"])
+            except Exception:
+                continue
+            ids = data.get("ids", [])
+            docs = data.get("documents", [])
+            metas = data.get("metadatas", [])
+            bad_ids = []
+            for i, cid in enumerate(ids):
+                doc = docs[i] if i < len(docs) and docs[i] else ""
+                meta = metas[i] if i < len(metas) and metas[i] else {}
+                full_text = meta.get("full_text", "")
+                text = full_text if full_text else doc
+                if not coherence_fn(text):
+                    bad_ids.append(cid)
+            if bad_ids:
+                try:
+                    collection.delete(ids=bad_ids)
+                    deleted += len(bad_ids)
+                except Exception:
+                    for bid in bad_ids:
+                        try:
+                            collection.delete(ids=[bid])
+                            deleted += 1
+                        except Exception:
+                            pass
+        if deleted:
+            log.info("Purged %d incoherent entries from vector store", deleted)
+        return deleted
+
     def stats(self) -> dict:
         return {
             "concepts": self._concepts.count(),

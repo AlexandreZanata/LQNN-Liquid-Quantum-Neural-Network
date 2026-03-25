@@ -1,5 +1,6 @@
 """Tests for lqnn.system.chat_engine."""
 
+import time
 
 from lqnn.system.chat_engine import ChatEngine
 
@@ -48,6 +49,7 @@ class TestChatEngine:
         engine = ChatEngine(memory=memory, llm=mock_llm)
         initial_count = memory.store.concept_count()
 
-        engine.chat("banana")
+        engine.chat("what is a banana fruit")
+        time.sleep(0.5)  # background learning thread
 
         assert memory.store.concept_count() > initial_count

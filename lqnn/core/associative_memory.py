@@ -46,23 +46,67 @@ log = logging.getLogger(__name__)
 # Quantum Decoherence Shield patterns -- environmental noise that
 # destroys coherent quantum states.
 _GARBAGE_INDICATORS = frozenset([
-    "%n%n", "%s%s", "rnd=", ";app=", ";uid=", "68BAC", "0A27C",
-    "iTradeEU", "76FF3D", "B8FCA4", "R_1;uid",
+    "%n%n", "%s%s", "rnd=", ";app=", ";uid=", "68bac", "0a27c",
+    "itradeeu", "76ff3d", "b8fca4", "r_1;uid", "\\x", "\\u00",
+    "cc0099", "0x", ";uid", "base64", "cdata[",
 ])
-_MIN_ALPHA_RATIO = 0.40
+_MIN_ALPHA_RATIO = 0.50
+_HEX_CHARS = frozenset("0123456789abcdefABCDEF")
 
 
 def _is_coherent(text: str) -> bool:
     """Quantum decoherence shield: reject fragments that are environmental
-    noise (corrupted PDF residue, binary artefacts, etc.)."""
-    if not text or len(text) < 3:
+    noise (corrupted PDF residue, binary artefacts, hex dumps, etc.)."""
+    if not text or len(text.strip()) < 5:
         return False
-    text_lower = text[:200].lower()
+    sample = text[:300].lower()
+
     for pattern in _GARBAGE_INDICATORS:
-        if pattern.lower() in text_lower:
+        if pattern in sample:
             return False
-    alpha_count = sum(c.isalpha() or c.isspace() for c in text[:200])
-    if alpha_count / max(len(text[:200]), 1) < _MIN_ALPHA_RATIO:
+
+    alpha_count = sum(c.isalpha() or c.isspace() for c in sample)
+    ratio = alpha_count / max(len(sample), 1)
+    if ratio < _MIN_ALPHA_RATIO:
+        return False
+
+    hex_run = 0
+    max_hex_run = 0
+    for ch in sample:
+        if ch in _HEX_CHARS:
+            hex_run += 1
+            if hex_run > max_hex_run:
+                max_hex_run = hex_run
+        else:
+            hex_run = 0
+    if max_hex_run >= 8:
+        return False
+
+    words = text.split()
+    if len(words) < 3:
+        return False
+
+    return True
+
+
+def _is_concept_safe(text: str) -> bool:
+    """Lighter coherence check for concept names (allows short clean words)."""
+    if not text or len(text.strip()) < 2:
+        return False
+    sample = text[:200].lower()
+    for pattern in _GARBAGE_INDICATORS:
+        if pattern in sample:
+            return False
+    hex_run = 0
+    for ch in sample:
+        if ch in _HEX_CHARS:
+            hex_run += 1
+            if hex_run >= 8:
+                return False
+        else:
+            hex_run = 0
+    alpha_count = sum(c.isalpha() or c.isspace() for c in sample)
+    if alpha_count / max(len(sample), 1) < 0.50:
         return False
     return True
 
@@ -157,6 +201,10 @@ class AssociativeMemory:
         self._confidence_history: list[float] = []
         self._confidence_window = 20
 
+        purged = self.store.purge_incoherent(_is_coherent)
+        if purged:
+            log.info("Startup decoherence purge removed %d entries", purged)
+
         self._start_bg_association_workers()
 
     def set_hei(self, hei) -> None:
@@ -233,6 +281,17 @@ class AssociativeMemory:
                       initial_confidence: float = 0.5) -> QuantumState:
         """Learn a concept by encoding it and generating associations."""
         concept_lower = concept.strip().lower()
+
+        if not _is_concept_safe(concept_lower) and image is None:
+            log.debug("Rejected incoherent concept: %s", concept_lower[:60])
+            return QuantumState(
+                concept=concept_lower,
+                primary_vector=np.zeros(512, dtype=np.float32),
+                associations=[],
+                volatility=1.0,
+                confidence=0.0,
+            )
+
         concept_id = self._make_id(concept_lower)
 
         text_vec = self._cached_encode_text(concept_lower)
@@ -634,6 +693,26 @@ class AssociativeMemory:
             [c.get("id", "") for c in concepts[:10]],
             [c.get("metadata", {}) for c in concepts[:10]],
         )
+
+        clean_concepts, clean_amps = [], []
+        for c, a in zip(concepts, amplitudes):
+            doc = c.get("document", "")
+            ft = c.get("metadata", {}).get("full_text", "")
+            if _is_coherent(ft) if ft else _is_coherent(doc):
+                clean_concepts.append(c)
+                clean_amps.append(a)
+        concepts, amplitudes = clean_concepts, clean_amps
+
+        assoc_results = [
+            a for a in assoc_results
+            if _is_coherent(a.get("document", ""))
+        ]
+        multi_hop = [
+            m for m in multi_hop
+            if _is_coherent(
+                m.get("metadata", {}).get("full_text", "")
+                or m.get("document", ""))
+        ]
 
         context = self._assemble_superposition_context(
             crystal_results, concepts, amplitudes, multi_hop, assoc_results)
