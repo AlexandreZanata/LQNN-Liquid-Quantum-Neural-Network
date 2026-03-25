@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 if TYPE_CHECKING:
-    from lqnn.core.vector_store import VectorEntry, VectorStore
+    from lqnn.core.vector_store import VectorStore
     from lqnn.models.clip_encoder import CLIPEncoder
 
 log = logging.getLogger(__name__)

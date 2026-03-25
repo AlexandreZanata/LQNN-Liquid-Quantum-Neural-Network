@@ -23,8 +23,6 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import Any
-
 import numpy as np
 
 log = logging.getLogger(__name__)

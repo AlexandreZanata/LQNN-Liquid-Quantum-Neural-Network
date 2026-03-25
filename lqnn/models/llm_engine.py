@@ -225,9 +225,9 @@ class LLMEngine:
             f"For each concept below, list exactly {n_per_concept} "
             f"associated words or very short phrases.\n\n"
             f"Concepts:\n" + "\n".join(concept_lines) + "\n\n"
-            f"Output format (strictly follow):\n"
-            f"CONCEPT: word1, word2, word3, ...\n"
-            f"One line per concept. Only words, no explanations."
+            "Output format (strictly follow):\n"
+            "CONCEPT: word1, word2, word3, ...\n"
+            "One line per concept. Only words, no explanations."
         )
         raw = self.generate(prompt, max_new_tokens=600, temperature=0.8,
                             system_prompt=system_prompt)
