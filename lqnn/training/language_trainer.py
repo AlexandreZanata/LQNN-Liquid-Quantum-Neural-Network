@@ -394,6 +394,7 @@ class LanguageTrainer:
                     },
                 )
                 self.memory.store.add_concept(entry)
+                self.memory._learn_count += 1
 
                 stored += 1
                 prog.pairs_stored += 1

@@ -185,7 +185,7 @@ class AssociativeMemory:
         self.store = store
         self.clip = clip
         self.llm = llm
-        self._learn_count = 0
+        self._learn_count = store.concept_count()
         self._query_count = 0
         self._embed_cache: OrderedDict[str, np.ndarray] = OrderedDict()
         self._assoc_bg_queue: queue.Queue = queue.Queue(maxsize=ASSOC_QUEUE_SIZE)
